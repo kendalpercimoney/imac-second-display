@@ -110,10 +110,6 @@ Not tested, in rough order of how likely they are to work:
 | `LanScreenHost.app` | arm64 | macOS 13 | Ad-hoc |
 | `LanScreenClient.app` | x86_64 | OS X 10.9 | Unsigned |
 
-> **The checked-in client binary is from v1.1.0 and is older than the current
-> source.** It predates the idle-traffic change, so pairing it with a current
-> host makes it blank every few seconds on a still screen. Rebuild it on the
-> iMac (`./Client/build.sh`) before using it with a host built from `main`.
 
 The client was built on the iMac itself with Xcode 6.2, because no current
 toolchain can target 10.9 (see section 3).

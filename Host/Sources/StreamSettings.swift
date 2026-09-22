@@ -1,0 +1,75 @@
+import Foundation
+import LSProtocol
+
+/// User-tunable knobs. Persisted in UserDefaults so the app comes back the
+/// way you left it.
+final class StreamSettings: ObservableObject {
+
+    /// Where the pixels come from.
+    enum Source: String, CaseIterable, Identifiable {
+        /// Create a headless display. This is what makes the iMac a genuine
+        /// second monitor rather than a mirror of the MacBook's screen.
+        case virtualDisplay = "Virtual display"
+        /// Capture a display that already exists -- the built-in screen, or a
+        /// real monitor, or a hardware HDMI dummy plug.
+        case existingDisplay = "Existing display"
+        var id: String { rawValue }
+    }
+
+    enum Profile: String, CaseIterable, Identifiable {
+        /// Baseline is the safe default: no CABAC, no B-frames, and it is what
+        /// the 2010 iMac's hardware decoder is happiest with.
+        case baseline = "Baseline"
+        /// Slightly better quality per bit, but CABAC costs the old GPU more.
+        case main = "Main"
+        var id: String { rawValue }
+    }
+
+    @Published var clientAddress: String { didSet { save(clientAddress, "clientAddress") } }
+    @Published var videoPort: Int       { didSet { save(videoPort, "videoPort") } }
+    @Published var controlPort: Int     { didSet { save(controlPort, "controlPort") } }
+    @Published var width: Int           { didSet { save(width, "width") } }
+    @Published var height: Int          { didSet { save(height, "height") } }
+    @Published var frameRate: Int       { didSet { save(frameRate, "frameRate") } }
+    @Published var bitrateMbps: Double  { didSet { save(bitrateMbps, "bitrateMbps") } }
+    @Published var profile: Profile     { didSet { save(profile.rawValue, "profile") } }
+    @Published var mtuPayload: Int      { didSet { save(mtuPayload, "mtuPayload") } }
+    @Published var showsCursor: Bool    { didSet { save(showsCursor, "showsCursor") } }
+    @Published var displayID: UInt32    { didSet { save(Int(displayID), "displayID") } }
+    @Published var source: Source       { didSet { save(source.rawValue, "source") } }
+    /// Retina backing store for the virtual display. Leave off: it doubles the
+    /// pixels the encoder has to chew through for no benefit on a 2010 panel.
+    @Published var hiDPI: Bool          { didSet { save(hiDPI, "hiDPI") } }
+    /// Seconds between unforced IDRs. Short GOPs recover from loss without the
+    /// back-channel; long GOPs save bandwidth. 2s is a reasonable middle.
+    @Published var keyframeSeconds: Double { didSet { save(keyframeSeconds, "keyframeSeconds") } }
+
+    private let defaults = UserDefaults.standard
+    private func save(_ value: Any, _ key: String) { defaults.set(value, forKey: "ls." + key) }
+
+    init() {
+        let d = UserDefaults.standard
+        func int(_ k: String, _ fallback: Int) -> Int {
+            d.object(forKey: "ls." + k) as? Int ?? fallback
+        }
+        func dbl(_ k: String, _ fallback: Double) -> Double {
+            d.object(forKey: "ls." + k) as? Double ?? fallback
+        }
+        clientAddress   = d.string(forKey: "ls.clientAddress") ?? "10.0.0.2"
+        videoPort       = int("videoPort", Int(LS_DEFAULT_VIDEO_PORT))
+        controlPort     = int("controlPort", Int(LS_DEFAULT_CONTROL_PORT))
+        width           = int("width", 1920)
+        height          = int("height", 1080)
+        frameRate       = int("frameRate", 60)
+        bitrateMbps     = dbl("bitrateMbps", 25)
+        profile         = Profile(rawValue: d.string(forKey: "ls.profile") ?? "") ?? .baseline
+        mtuPayload      = int("mtuPayload", Int(LS_DEFAULT_MTU_PAYLOAD))
+        showsCursor     = d.object(forKey: "ls.showsCursor") as? Bool ?? true
+        displayID       = UInt32(int("displayID", 0))
+        source          = Source(rawValue: d.string(forKey: "ls.source") ?? "") ?? .virtualDisplay
+        hiDPI           = d.object(forKey: "ls.hiDPI") as? Bool ?? false
+        keyframeSeconds = dbl("keyframeSeconds", 2.0)
+    }
+
+    var bitrateBitsPerSecond: Int { Int(bitrateMbps * 1_000_000) }
+}

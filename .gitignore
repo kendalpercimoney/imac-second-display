@@ -1,0 +1,12 @@
+# SwiftPM build products
+.build/
+
+# Assembled .app bundles and the loopback test's scratch output
+build/
+
+# macOS
+.DS_Store
+
+# Xcode
+*.xcuserdatad
+xcuserdata/

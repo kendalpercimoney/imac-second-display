@@ -238,6 +238,20 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Toggle("Wake the client when streaming starts and when this Mac wakes",
                        isOn: $settings.wakeClientAutomatically)
+                Toggle("Keep this Mac at full performance while streaming",
+                       isOn: $settings.preventAppNap)
+                    .help("Opts out of App Nap and timer coalescing. Without it the "
+                          + "picture degrades when you stop moving the cursor, because "
+                          + "macOS treats an unfocused app on an idle system as "
+                          + "something it can throttle.")
+                if controller.isRunning {
+                    Text(controller.fullPerformanceHeld
+                         ? "Full performance asserted — macOS will not throttle this app"
+                         : "Not asserted — macOS may throttle this app when you stop typing")
+                        .font(.caption)
+                        .foregroundStyle(controller.fullPerformanceHeld ? .green : .orange)
+                }
+
                 Toggle("Stop streaming when this Mac sleeps", isOn: $settings.stopOnSleep)
                     .help("Lets the client drop its keep-awake assertion so the iMac "
                           + "can sleep too, instead of sitting lit up showing a frozen frame.")

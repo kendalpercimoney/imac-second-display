@@ -31,13 +31,6 @@ func check(_ condition: Bool, _ message: String) {
     if !condition { failures += 1; print("  FAIL \(message)") }
 }
 
-print("subnet arithmetic")
-check(WakeOnLAN.directedBroadcast(for: "10.0.0.2") == "10.0.0.255",
-      "10.0.0.2 should broadcast to 10.0.0.255, got \(WakeOnLAN.directedBroadcast(for: "10.0.0.2") ?? "nil")")
-check(WakeOnLAN.directedBroadcast(for: "192.168.1.50") == "192.168.1.255", "192.168.1.x broadcast")
-check(WakeOnLAN.directedBroadcast(for: "not.an.ip.at.all") == nil, "garbage should not parse")
-check(WakeOnLAN.directedBroadcast(for: "10.0.0") == nil, "a three-part address should not parse")
-
 print("MAC survives a HELLO round trip into Swift")
 do {
     // Exactly the conversion ControlChannel performs on an incoming HELLO.
@@ -79,26 +72,42 @@ let bad = WakeOnLAN.wake(macAddress: "nonsense", clientAddress: clientIP)
 check(bad.sent == 0 && bad.error != nil, "a malformed MAC should be refused, got \(bad.summary)")
 
 print("interface selection")
-let localAddress = WakeOnLAN.localAddressOnSameSubnet(as: clientIP)
-if let local = localAddress {
-    print("  local address on the client's subnet: \(local)")
-} else {
-    print("  no interface on the client's subnet -- the direct link is not up.")
+let link = WakeOnLAN.localLink(reaching: clientIP)
+guard let link else {
+    print("  no interface shares a subnet with \(clientIP) -- the direct link is down.")
     print("  Skipping the send check; bring the link up to exercise it.")
     print(failures == 0 ? "\nRESULT: PASS (send check skipped)" : "\nRESULT: FAIL")
     exit(failures == 0 ? 0 : 1)
 }
+print("  local address: \(link.address)")
+print("  interface broadcast: \(link.broadcast ?? "none reported")")
+check(link.broadcast != nil,
+      "the interface reported no broadcast address, so the broadcast wake cannot be sent")
 
 print("sending a real magic packet")
 let result = WakeOnLAN.wake(macAddress: mac, clientAddress: clientIP)
 print("  \(result.summary)")
 check(result.error == nil, "send reported an error")
-check(result.sent == 4, "expected 4 packets (unicast and broadcast, ports 9 and 7), got \(result.sent)")
-check(result.sentFrom == localAddress,
-      "packets must leave from \(localAddress ?? "nil"), went from \(result.sentFrom ?? "nil")")
+check(result.sentFrom == link.address,
+      "packets must leave from \(link.address), went from \(result.sentFrom ?? "nil")")
+
+// This is the assertion that matters, and it is self-validating: sendto fails
+// outright for an address that is not reachable on the bound interface. The
+// previous version computed the broadcast address by assuming a /24 and
+// replacing the last octet, which on a link with a 255.255.0.0 mask produces an
+// ordinary host address rather than a broadcast -- and those sends failed here.
 check(result.destinations.contains("\(clientIP):9"), "missing the unicast destination")
-check(result.destinations.contains("\(WakeOnLAN.directedBroadcast(for: clientIP) ?? ""):9"),
-      "missing the broadcast destination")
+if let broadcast = link.broadcast {
+    check(result.destinations.contains("\(broadcast):9"),
+          "the interface broadcast \(broadcast) was not reached")
+}
+check(result.destinations.contains("255.255.255.255:9"),
+      "the limited broadcast backstop was not reached")
+
+// Every target, both ports, no silent failures.
+let expected = (link.broadcast == nil ? 2 : 3) * 2
+check(result.sent == expected,
+      "expected \(expected) packets, got \(result.sent) -- a destination was unreachable")
 
 print(failures == 0 ? "\nRESULT: PASS" : "\nRESULT: FAIL (\(failures))")
 exit(failures == 0 ? 0 : 1)

@@ -446,6 +446,7 @@ in hardware, but how comfortably depends on which GPU it has.
 
 | Symptom | Change |
 |---|---|
+| **Quality drops when you stop moving the cursor** | Turn on "Keep this Mac at full performance while streaming" in Power. See below |
 | Client stutters, `decode` over ~15 ms | Drop resolution, or 60 → 30 fps |
 | Blocky during motion | Raise bitrate |
 | `packets lost` climbing | Lower bitrate; check the cable; raise `kern.ipc.maxsockbuf` |
@@ -485,6 +486,34 @@ If the iMac is still struggling, look at `decode` in its statistics overlay
 (press `S`). Above about 15 ms per frame at 60 fps it cannot keep up, and the
 shallow decode queue will start dropping frames rather than accumulating
 latency — visible as `dropped` climbing in the same overlay.
+
+### Quality drops when you stop touching the MacBook
+
+macOS App Naps an app that is not frontmost on a system with no keyboard or
+trackbad activity: it lowers the process's quality of service and coalesces its
+timers. For a video encoder that shows up as an uneven frame rate and a softer
+picture — and it recovers the moment you move the cursor, because that counts
+as user activity.
+
+The host now declares itself busy for as long as it is streaming
+(`ProcessInfo.beginActivity` with `.userInitiated` and `.latencyCritical`, the
+latter being what turns off timer coalescing). The toggle is in the Power
+section and is on by default; the window tells you whether the assertion is
+actually held.
+
+When capturing an existing display rather than a virtual one, it additionally
+keeps that display awake, because a display that has gone to sleep stops
+producing frames to capture.
+
+If the picture still degrades with that on, watch **Encoded fps** and **Sending
+Mb/s** in the host window while you stop moving the cursor:
+
+| What you see | What it means |
+|---|---|
+| Both drop | Something is still throttling. Check the toggle is asserted |
+| fps drops, Mb/s holds | The source stopped producing frames — a browser throttling a background window, for instance. Not something this can fix |
+| fps holds, Mb/s drops | The encoder is hitting its bitrate ceiling. Raise the bitrate |
+| Both hold, but the iMac looks worse | The iMac is dropping frames. Check `dropped` in its overlay (`S`) |
 
 ### Host and client versions have to match
 
@@ -687,7 +716,8 @@ Tests/
   loopreceive.m          loopback receiver + latency measurement
   LoopSend/main.swift    loopback sender
   checkpattern.m         colour round-trip verification
-  WakeCheck/main.swift   Wake-on-LAN subnet maths and interface selection
+  WakeCheck/main.swift   Wake-on-LAN interface selection and delivery
+  IdleCost/main.swift    measures what an idle screen costs to stream
   run_loopback_test.sh   headless: unit tests + encode/decode round trip
   run_render_test.sh     the OpenGL path, checked numerically
 ```

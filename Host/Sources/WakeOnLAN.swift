@@ -79,22 +79,28 @@ enum WakeOnLAN {
         // Bind to our address on the client's subnet so the packet leaves by the
         // direct link. Without this a broadcast would follow the default route
         // and go out over Wi-Fi, where the iMac is not listening.
+        let link = localLink(reaching: clientAddress)
+
         var sentFrom: String?
-        if let localAddress = localAddressOnSameSubnet(as: clientAddress) {
-            if var bindAddress = try? makeSockaddr(host: localAddress, port: 0) {
-                let rc = withUnsafePointer(to: &bindAddress) { p -> Int32 in
-                    p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                        Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                    }
+        if let link, var bindAddress = try? makeSockaddr(host: link.address, port: 0) {
+            let rc = withUnsafePointer(to: &bindAddress) { p -> Int32 in
+                p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
                 }
-                if rc == 0 { sentFrom = localAddress }
             }
+            if rc == 0 { sentFrom = link.address }
         }
 
         var destinations: [String] = []
         var sent = 0
+        // Unicast, then the interface's real broadcast address, then the
+        // limited broadcast as a backstop. Sleeping cards differ in what they
+        // will accept, and on a direct cable there is nobody else to bother.
         var targets = [clientAddress]
-        if let broadcast = directedBroadcast(for: clientAddress) { targets.append(broadcast) }
+        if let broadcast = link?.broadcast, !targets.contains(broadcast) {
+            targets.append(broadcast)
+        }
+        if !targets.contains("255.255.255.255") { targets.append("255.255.255.255") }
 
         for host in targets {
             for port in [UInt16(LS_WOL_PORT), UInt16(7)] {
@@ -121,38 +127,67 @@ enum WakeOnLAN {
         return Result(sent: sent, destinations: destinations, sentFrom: sentFrom, error: nil)
     }
 
-    /// The /24 directed broadcast for an address, e.g. 10.0.0.2 -> 10.0.0.255.
-    ///
-    /// /24 is assumed because that is what the setup instructions specify. A
-    /// wider mask still works for the unicast attempt above.
-    static func directedBroadcast(for address: String) -> String? {
-        let parts = address.split(separator: ".")
-        guard parts.count == 4, parts.allSatisfy({ UInt8($0) != nil }) else { return nil }
-        return "\(parts[0]).\(parts[1]).\(parts[2]).255"
+    /// This Mac's endpoint on the same link as the client.
+    struct LocalLink {
+        var address: String
+        /// The interface's real broadcast address, read from the kernel.
+        var broadcast: String?
     }
 
-    /// Our own IPv4 address on the same /24 as the client, if we have one.
-    /// IP addresses are not masked by the OS the way hardware addresses are.
-    static func localAddressOnSameSubnet(as clientAddress: String) -> String? {
-        let clientParts = clientAddress.split(separator: ".")
-        guard clientParts.count == 4 else { return nil }
-        let prefix = clientParts.prefix(3).joined(separator: ".") + "."
+    /// Finds the interface that shares a subnet with `clientAddress`, using the
+    /// interface's actual netmask.
+    ///
+    /// This used to assume /24 and compute the broadcast address by replacing
+    /// the last octet with 255. On a link configured with a 255.255.0.0 mask
+    /// that produces an address which is not the broadcast address at all, just
+    /// an ordinary host on the subnet -- so the broadcast half of the wake
+    /// silently went nowhere. The kernel already knows the right answer, so ask
+    /// it rather than guessing from the address shape.
+    static func localLink(reaching clientAddress: String) -> LocalLink? {
+        var clientRaw = in_addr()
+        guard inet_pton(AF_INET, clientAddress, &clientRaw) == 1 else { return nil }
 
         var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let first = head else { return nil }
+        guard getifaddrs(&head) == 0, head != nil else { return nil }
         defer { freeifaddrs(head) }
 
-        var entry: UnsafeMutablePointer<ifaddrs>? = first
+        var entry = head
         while let current = entry {
             defer { entry = current.pointee.ifa_next }
+
+            let flags = Int32(current.pointee.ifa_flags)
+            guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
             guard let rawAddress = current.pointee.ifa_addr,
-                  rawAddress.pointee.sa_family == UInt8(AF_INET) else { continue }
-            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-            var sin = UnsafeRawPointer(rawAddress).assumingMemoryBound(to: sockaddr_in.self).pointee
-            inet_ntop(AF_INET, &sin.sin_addr, &buffer, socklen_t(INET_ADDRSTRLEN))
-            let text = String(cString: buffer)
-            if text.hasPrefix(prefix) { return text }
+                  rawAddress.pointee.sa_family == UInt8(AF_INET),
+                  let rawNetmask = current.pointee.ifa_netmask else { continue }
+
+            let local = UnsafeRawPointer(rawAddress)
+                .assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr.s_addr
+            let mask = UnsafeRawPointer(rawNetmask)
+                .assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr.s_addr
+
+            // Same subnet under this interface's own mask, whatever it is.
+            guard (local & mask) == (clientRaw.s_addr & mask) else { continue }
+
+            var broadcast: String?
+            if flags & IFF_BROADCAST != 0, let rawBroadcast = current.pointee.ifa_dstaddr,
+               rawBroadcast.pointee.sa_family == UInt8(AF_INET) {
+                var value = UnsafeRawPointer(rawBroadcast)
+                    .assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
+                broadcast = string(from: &value)
+            }
+            var localValue = in_addr(s_addr: local)
+            guard let addressText = string(from: &localValue) else { continue }
+            return LocalLink(address: addressText, broadcast: broadcast)
         }
         return nil
+    }
+
+    private static func string(from address: inout in_addr) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &address, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil else {
+            return nil
+        }
+        return String(cString: buffer)
     }
 }

@@ -78,6 +78,15 @@ final class StreamSettings: ObservableObject {
     /// keep-awake assertion and can sleep too.
     @Published var stopOnSleep: Bool { didSet { save(stopOnSleep, "stopOnSleep") } }
 
+    /// Tell macOS this Mac is busy for as long as we are streaming.
+    ///
+    /// Without it, an app that is not frontmost with no keyboard or trackpad
+    /// activity is a candidate for App Nap: lowered quality of service and
+    /// coalesced timers. Which is why the picture degrades when you stop
+    /// moving the cursor and recovers when you move it again -- moving it
+    /// counts as user activity and suppresses the throttling.
+    @Published var preventAppNap: Bool { didSet { save(preventAppNap, "preventAppNap") } }
+
     private let defaults = UserDefaults.standard
     private func save(_ value: Any, _ key: String) { defaults.set(value, forKey: "ls." + key) }
 
@@ -106,6 +115,7 @@ final class StreamSettings: ObservableObject {
         wakeClientAutomatically = d.object(forKey: "ls.wakeClientAutomatically") as? Bool ?? true
         clientMACAddress = d.string(forKey: "ls.clientMACAddress") ?? ""
         stopOnSleep = d.object(forKey: "ls.stopOnSleep") as? Bool ?? true
+        preventAppNap = d.object(forKey: "ls.preventAppNap") as? Bool ?? true
     }
 
     var bitrateBitsPerSecond: Int { Int(bitrateMbps * 1_000_000) }

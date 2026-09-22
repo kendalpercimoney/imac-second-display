@@ -46,6 +46,7 @@ final class StreamController: ObservableObject {
     @Published private(set) var sdpPath: String?
     @Published private(set) var activeSourceDescription: String = ""
     @Published private(set) var wakeStatus: String = ""
+    @Published private(set) var fullPerformanceHeld = false
     @Published var displays: [DisplayInfo] = []
 
     var virtualDisplaySupported: Bool { LSVirtualDisplay.isSupported() }
@@ -66,6 +67,7 @@ final class StreamController: ObservableObject {
     private var idleTimer: DispatchSourceTimer?
     private var statsTimer: Timer?
     private var wakeRetryTimer: DispatchSourceTimer?
+    private var activityToken: NSObjectProtocol?
     private var sleepObservers: [NSObjectProtocol] = []
 
     /// The most recent captured frame, retained rather than copied, so an
@@ -92,6 +94,37 @@ final class StreamController: ObservableObject {
         for observer in sleepObservers {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
+    }
+
+    // MARK: - App Nap
+
+    /// Declares the process busy so macOS leaves it alone while streaming.
+    ///
+    /// `.latencyCritical` is the part that matters most here: it turns off
+    /// timer coalescing, which the OS otherwise applies to an idle system and
+    /// which shows up as an uneven frame rate. `.userInitiated` keeps the
+    /// system from idle-sleeping mid-stream and opts out of App Nap.
+    private func beginFullPerformance() {
+        guard settings.preventAppNap, activityToken == nil else { return }
+
+        var options: ProcessInfo.ActivityOptions = [.userInitiated, .latencyCritical]
+        if settings.source == .existingDisplay {
+            // A display that has gone to sleep stops producing frames to
+            // capture. A virtual display has no such problem, so we only pay
+            // the power cost of a lit screen when capturing a real one.
+            options.insert(.idleDisplaySleepDisabled)
+        }
+
+        activityToken = ProcessInfo.processInfo.beginActivity(
+            options: options, reason: "Streaming this screen to another Mac")
+        onMain { self.fullPerformanceHeld = true }
+    }
+
+    private func endFullPerformance() {
+        guard let token = activityToken else { return }
+        ProcessInfo.processInfo.endActivity(token)
+        activityToken = nil
+        onMain { self.fullPerformanceHeld = false }
     }
 
     // MARK: - sleep and wake
@@ -242,6 +275,7 @@ final class StreamController: ObservableObject {
         // has to exist and be published to the window server before
         // ScreenCaptureKit will enumerate it.
         let captureDisplayID = try await resolveCaptureDisplay()
+        beginFullPerformance()
 
         let sender = try UDPSender(host: settings.clientAddress,
                                    port: UInt16(settings.videoPort))
@@ -368,6 +402,7 @@ final class StreamController: ObservableObject {
     }
 
     private func teardown() async {
+        endFullPerformance()
         idleTimer?.cancel(); idleTimer = nil
         wakeRetryTimer?.cancel(); wakeRetryTimer = nil
         await MainActor.run { self.statsTimer?.invalidate(); self.statsTimer = nil }

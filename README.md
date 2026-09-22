@@ -6,6 +6,8 @@ OS X 10.9.5, over a direct Ethernet cable.
 Hardware H.264 encode on the M1 Pro, RTP over raw UDP, hardware decode and
 zero-copy OpenGL rendering on the iMac.
 
+Licensed under the [GNU GPL v3](LICENSE).
+
 ```
  MacBook Pro M1 Pro (10.0.0.1)                  iMac 2010 (10.0.0.2)
  ─────────────────────────────                  ────────────────────
@@ -446,6 +448,29 @@ it does freeze, the heartbeat is not reaching the client.
 - **No encryption.** Plain RTP on a direct cable between two machines you own.
   Do not run this across a network you do not control.
 - **IPv4 only**, one client at a time.
+
+## Licence
+
+Copyright (C) 2026 Kendal Percimoney.
+
+LanScreen is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See [LICENSE](LICENSE) for the full text.
+
+That is copyleft: if you distribute a modified version, you have to release your
+changes under the GPL too.
+
+Two things the licence does not cover:
+
+- **H.264 is patent-encumbered.** An open source licence grants copyright
+  permission, not patent permission. In practice this matters little here
+  because the encoding and decoding are done by Apple's VideoToolbox on Apple
+  hardware, which Apple licenses, but the distinction is worth knowing if you
+  port the codec parts elsewhere.
+- **`CGVirtualDisplay` is private Apple API.** Using it is a choice about
+  stability and App Store eligibility, not about licensing. See
+  `Host/VirtualDisplay/`.
 
 ## Layout
 

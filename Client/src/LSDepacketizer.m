@@ -49,6 +49,7 @@
 }
 
 - (void)reset {
+    _partialFrameStartedAt = 0;
     [_accessUnit setLength:0];
     [_fragment setLength:0];
     _haveSequence = NO;
@@ -129,6 +130,7 @@
     [_fragment setLength:0];
     _currentTimestamp = timestamp;
     _haveTimestamp = YES;
+    _partialFrameStartedAt = [NSDate timeIntervalSinceReferenceDate];
 }
 
 #pragma mark - NAL handling
@@ -221,6 +223,7 @@
 #pragma mark - delivery
 
 - (void)finishAccessUnit {
+    _partialFrameStartedAt = 0;
     if (_accessUnitCorrupt) {
         _framesCorrupt++;
         [_accessUnit setLength:0];

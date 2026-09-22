@@ -35,4 +35,9 @@
 /// Wall-clock time of the last datagram, for "has the host gone away" checks.
 @property (nonatomic, readonly) NSTimeInterval lastPacketTime;
 
+/// The receive buffer the kernel actually granted, in bytes. A large frame
+/// arrives as hundreds of packets back to back, so this is the difference
+/// between absorbing a burst and dropping most of it.
+@property (nonatomic, readonly) int receiveBufferBytes;
+
 @end

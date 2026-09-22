@@ -53,16 +53,43 @@
     int on = 1;
     setsockopt(_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 
-    // A keyframe arrives as a burst of hundreds of datagrams back to back. The
-    // 8 MB receive buffer is what stops the kernel from discarding the tail of
-    // that burst while the decode thread is busy.
-    int rcvbuf = 8 * 1024 * 1024;
-    if (setsockopt(_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) != 0) {
-        // OS X clamps this to net.inet.udp.recvspace / kern.ipc.maxsockbuf.
-        // Not fatal, but worth saying out loud because it shows up later as
-        // mysterious packet loss under load.
-        NSLog(@"[LanScreen] could not set an 8 MB receive buffer (%s). "
-              @"Consider: sudo sysctl -w kern.ipc.maxsockbuf=8388608", strerror(errno));
+    // A large frame arrives as hundreds of datagrams back to back -- a 1080p
+    // keyframe is around 490 KB, which is some 360 packets. The receive buffer
+    // is what absorbs that while the decode thread is busy with the previous
+    // frame.
+    //
+    // This used to ask for 8 MB once and give up if that failed, which was a
+    // bad bug: the kernel refuses the whole request when it exceeds
+    // kern.ipc.maxsockbuf rather than granting what it can, and OS X 10.9
+    // defaults that ceiling to 4 MB. So on the intended target the call failed
+    // and the socket was left at the default receive space -- tens of
+    // kilobytes, a couple of dozen packets. Everything beyond that was dropped
+    // on every large frame, which looks like blocky corruption whenever the
+    // picture gets busy.
+    //
+    // Ask for progressively less until something is granted, then read back
+    // what we actually got rather than assuming.
+    static const int kCandidates[] = {
+        16 * 1024 * 1024, 8 * 1024 * 1024, 4 * 1024 * 1024,
+        2 * 1024 * 1024, 1024 * 1024, 512 * 1024, 256 * 1024
+    };
+    for (size_t i = 0; i < sizeof(kCandidates) / sizeof(kCandidates[0]); i++) {
+        int wanted = kCandidates[i];
+        if (setsockopt(_fd, SOL_SOCKET, SO_RCVBUF, &wanted, sizeof(wanted)) == 0) break;
+    }
+    int granted = 0;
+    socklen_t grantedSize = sizeof(granted);
+    if (getsockopt(_fd, SOL_SOCKET, SO_RCVBUF, &granted, &grantedSize) == 0) {
+        _receiveBufferBytes = granted;
+    }
+
+    if (_receiveBufferBytes >= 1024 * 1024) {
+        NSLog(@"[LanScreen] receive buffer: %d KB", _receiveBufferBytes / 1024);
+    } else {
+        NSLog(@"[LanScreen] receive buffer is only %d KB, which is too small to "
+              @"absorb a keyframe. Expect blocky corruption on busy pictures. "
+              @"Fix with: sudo sysctl -w kern.ipc.maxsockbuf=8388608",
+              _receiveBufferBytes / 1024);
     }
 
     struct sockaddr_in addr;

@@ -35,6 +35,15 @@ final class VideoEncoder {
         var bitrate: Int
         var profileIsBaseline: Bool
         var keyframeInterval: Double
+        /// Trade picture quality for encoder speed. Measured as no help to
+        /// latency on Apple Silicon and a real cost to quality on detailed,
+        /// fast-moving content, so it defaults off.
+        var prioritizeSpeed: Bool = false
+        /// Cap on burstiness, as a multiple of the average bitrate over one
+        /// second. nil removes the cap. A cap that is too tight starves
+        /// demanding content -- zooming a photograph, say -- and shows up as
+        /// blotchy blocks.
+        var dataRateLimitMultiplier: Double? = 4.0
     }
 
     private var session: VTCompressionSession?
@@ -87,9 +96,7 @@ final class VideoEncoder {
         if !trySet(session, kVTCompressionPropertyKey_MaxFrameDelayCount, 0) {
             _ = trySet(session, kVTCompressionPropertyKey_MaxFrameDelayCount, 1)
         }
-        // Measured as a wash on M1 Pro, but it is a documented low-latency hint
-        // and costs nothing, so leave it in for other silicon.
-        if #available(macOS 14.0, *) {
+        if config.prioritizeSpeed, #available(macOS 14.0, *) {
             set(session, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, true)
         }
         set(session, kVTCompressionPropertyKey_ProfileLevel,
@@ -109,12 +116,13 @@ final class VideoEncoder {
             config.keyframeInterval)
         set(session, kVTCompressionPropertyKey_MaximizePowerEfficiency, false)
 
-        // Hard cap on burstiness. Without this a keyframe can dump a megabyte
-        // into the NIC in one go and overrun the client's receive buffer.
-        // Allow 2x the average bitrate over any 1-second window.
-        let byteCap = NSNumber(value: config.bitrate / 8 * 2)
-        set(session, kVTCompressionPropertyKey_DataRateLimits,
-            [byteCap, NSNumber(value: 1.0)] as CFArray)
+        // Cap on burstiness, so a keyframe cannot dump a megabyte into the NIC
+        // in one go and overrun the client's receive buffer.
+        if let multiplier = config.dataRateLimitMultiplier {
+            let byteCap = NSNumber(value: Double(config.bitrate) / 8.0 * multiplier)
+            set(session, kVTCompressionPropertyKey_DataRateLimits,
+                [byteCap, NSNumber(value: 1.0)] as CFArray)
+        }
 
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
@@ -146,9 +154,11 @@ final class VideoEncoder {
     func updateBitrate(_ bitsPerSecond: Int) {
         guard let session else { return }
         set(session, kVTCompressionPropertyKey_AverageBitRate, bitsPerSecond)
-        let byteCap = NSNumber(value: bitsPerSecond / 8 * 2)
-        set(session, kVTCompressionPropertyKey_DataRateLimits,
-            [byteCap, NSNumber(value: 1.0)] as CFArray)
+        if let multiplier = config.dataRateLimitMultiplier {
+            let byteCap = NSNumber(value: Double(bitsPerSecond) / 8.0 * multiplier)
+            set(session, kVTCompressionPropertyKey_DataRateLimits,
+                [byteCap, NSNumber(value: 1.0)] as CFArray)
+        }
     }
 
     /// Sets a property without recording a warning; returns whether it stuck.

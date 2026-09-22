@@ -55,4 +55,13 @@
 @property (nonatomic, readonly) uint32_t packetsLost;
 @property (nonatomic, readonly) uint32_t framesCorrupt;
 
+/// When assembly of the current frame began, or 0 if no frame is part-built.
+///
+/// Written by the receive thread and read by the timer on the main thread
+/// without a lock. That race is deliberate and harmless: the only consumer
+/// compares it against a half-second threshold, and the cost of reading a torn
+/// or stale value is at worst one spurious keyframe request, which is already
+/// rate limited.
+@property (nonatomic, readonly) NSTimeInterval partialFrameStartedAt;
+
 @end

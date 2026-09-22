@@ -592,6 +592,23 @@ pipeline. Use the real client for a real number.
 `--network-caching`, which defaults to 1000 ms. Run it with
 `--network-caching=0`, or better, use the real client (section 7).
 
+**Blocky, blotchy corruption when the picture gets busy** — zooming a photo,
+scrolling fast, playing video. Almost always packet loss on a burst rather than
+anything to do with encoding quality. A 1080p keyframe is around 490 KB, or some
+360 packets back to back, and if the client's receive buffer cannot absorb that
+while the decode thread is busy the tail is dropped.
+
+Check the client's overlay (`S`) for the `recv buffer` line. Under a megabyte is
+too small. Then raise the ceiling on the iMac:
+
+```bash
+sudo sysctl -w kern.ipc.maxsockbuf=8388608
+```
+
+Add `kern.ipc.maxsockbuf=8388608` to `/etc/sysctl.conf` to make it stick. Also
+watch **Packets lost** in the host window: if it climbs during busy pictures
+that confirms it, and if it stays at zero the problem is elsewhere.
+
 **The iMac's screen blanks while I am using it** — The keep-awake assertion is
 not being taken. Check the client overlay (`S`) for "awake assertion held". If
 it says released, the stream is not arriving. If the client logs that it could

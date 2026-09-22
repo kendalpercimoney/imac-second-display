@@ -307,6 +307,22 @@
     _bytesAtLastTick = bytes;
     _incomingMbps = (double)delta * 8.0 / 1000000.0;
 
+    // A frame that never finished arriving.
+    //
+    // Losing a packet mid-stream is self-correcting: the next packet reveals
+    // the sequence gap and we ask for a keyframe. But if the loss takes the
+    // tail of the last frame before the screen goes still, no further packet
+    // ever arrives to reveal it -- so the part-built frame just sits there and
+    // the iMac shows the previous one indefinitely. Asking for a keyframe
+    // repairs it. Only reads state here; the depacketizer itself is left for
+    // the receive thread to reset through its normal path when the new frame
+    // arrives with a different timestamp.
+    NSTimeInterval partialSince = [_depacketizer partialFrameStartedAt];
+    if (_sawFirstFrame && partialSince > 0 &&
+        [NSDate timeIntervalSinceReferenceDate] - partialSince > 0.5) {
+        [_control requestKeyframe];
+    }
+
     // Is the host still there?
     //
     // Silence on the video socket used to be the test, but a still screen now
@@ -398,6 +414,9 @@
             [_decoder decodeMicroseconds] / 1000.0,
             [_glView renderMicroseconds] / 1000.0,
             _glView.vsyncEnabled ? @"on" : @"off"];
+        [text appendFormat:@"recv buffer %d KB%@\n",
+            [_receiver receiveBufferBytes] / 1024,
+            [_receiver receiveBufferBytes] < 1024 * 1024 ? @"   TOO SMALL" : @""];
         [text appendFormat:@"awake assertion %@   mac %@\n",
             _power.isKeepingAwake ? @"held" : @"released",
             _control.localMACString ?: @"unknown"];

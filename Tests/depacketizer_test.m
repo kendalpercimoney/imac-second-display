@@ -73,6 +73,10 @@ typedef struct {
     size_t mtuPayload;
     int dropIndex;      // -1 for none; otherwise the Nth emitted packet is dropped
     int emitted;
+    /// Set before a sendNAL call to lose that NAL's final packet -- the one
+    /// carrying the marker bit. Computing the index by hand is easy to get
+    /// wrong, and getting it wrong silently tests the opposite case.
+    int dropLastPacketOfNextNAL;
 } Sender;
 
 static void feed(Sender *sender, const uint8_t *packet, size_t length) {
@@ -95,6 +99,18 @@ static void sendNAL(Sender *sender, const uint8_t *nal, size_t length,
                     uint32_t timestamp, int marker) {
     uint8_t packet[LS_MAX_UDP_PAYLOAD];
     size_t maxPayload = sender->mtuPayload - LS_RTP_HEADER_SIZE;
+
+    if (sender->dropLastPacketOfNextNAL) {
+        sender->dropLastPacketOfNextNAL = 0;
+        size_t packets;
+        if (length <= maxPayload) {
+            packets = 1;
+        } else {
+            size_t capacity = maxPayload - 2;
+            packets = ((length - 1) + capacity - 1) / capacity;
+        }
+        sender->dropIndex = sender->emitted + (int)packets - 1;
+    }
 
     if (length <= maxPayload) {
         size_t header = ls_rtp_write_header(packet, sizeof(packet), marker,
@@ -155,7 +171,7 @@ static void testSingleAndFragmented(void) {
     LSDepacketizer *depacketizer = [[LSDepacketizer alloc] init];
     depacketizer.delegate = harness;
 
-    Sender sender = { depacketizer, 1000, 0xDEADBEEF, LS_DEFAULT_MTU_PAYLOAD, -1, 0 };
+    Sender sender = { depacketizer, 1000, 0xDEADBEEF, LS_DEFAULT_MTU_PAYLOAD, -1, 0, 0 };
 
     NSData *sps = makeNAL(0x67, 20, 1);
     NSData *pps = makeNAL(0x68, 8, 2);
@@ -191,7 +207,7 @@ static void testLossAndRecovery(void) {
     LSDepacketizer *depacketizer = [[LSDepacketizer alloc] init];
     depacketizer.delegate = harness;
 
-    Sender sender = { depacketizer, 500, 0xCAFE, LS_DEFAULT_MTU_PAYLOAD, -1, 0 };
+    Sender sender = { depacketizer, 500, 0xCAFE, LS_DEFAULT_MTU_PAYLOAD, -1, 0, 0 };
 
     NSData *sps = makeNAL(0x67, 20, 1);
     NSData *pps = makeNAL(0x68, 8, 2);
@@ -240,6 +256,49 @@ static void testLossAndRecovery(void) {
           "keyframe requests kept firing after recovery");
 }
 
+static void testStalledPartialFrame(void) {
+    printf("a frame that never finishes arriving is detectable\n");
+    Harness *harness = [[Harness alloc] init];
+    LSDepacketizer *depacketizer = [[LSDepacketizer alloc] init];
+    depacketizer.delegate = harness;
+
+    Sender sender = { depacketizer, 90, 0xFEED, LS_DEFAULT_MTU_PAYLOAD, -1, 0, 0 };
+    NSData *sps = makeNAL(0x67, 20, 1);
+    NSData *pps = makeNAL(0x68, 8, 2);
+    NSData *idr = makeNAL(0x65, 3000, 3);
+
+    CHECK([depacketizer partialFrameStartedAt] == 0,
+          "nothing has arrived yet, so no frame should be part-built");
+
+    sendNAL(&sender, [sps bytes], [sps length], 0, 0);
+    sendNAL(&sender, [pps bytes], [pps length], 0, 0);
+    sendNAL(&sender, [idr bytes], [idr length], 0, 1);
+    CHECK([harness.accessUnits count] == 1, "setup: the IDR should have arrived");
+    CHECK([depacketizer partialFrameStartedAt] == 0,
+          "a completed frame should leave nothing part-built");
+
+    // A frame whose final packet never turns up: no marker bit, and nothing
+    // follows it. This is the case the stall check exists for -- there is no
+    // later packet to expose the gap, so without a timer nobody ever notices.
+    NSData *tail = makeNAL(0x41, 6000, 4);
+    sender.dropLastPacketOfNextNAL = 1;
+    sendNAL(&sender, [tail bytes], [tail length], 3000, 1);
+
+    CHECK([harness.accessUnits count] == 1, "the truncated frame must not be delivered");
+    CHECK([depacketizer partialFrameStartedAt] > 0,
+          "a part-built frame should report when assembly started");
+
+    // Recovery: a fresh IDR arrives and the part-built frame is abandoned.
+    sender.dropIndex = -1;
+    NSData *recovery = makeNAL(0x65, 2000, 5);
+    sendNAL(&sender, [sps bytes], [sps length], 6000, 0);
+    sendNAL(&sender, [pps bytes], [pps length], 6000, 0);
+    sendNAL(&sender, [recovery bytes], [recovery length], 6000, 1);
+    CHECK([harness.accessUnits count] == 2, "the stream should recover on the next IDR");
+    CHECK([depacketizer partialFrameStartedAt] == 0,
+          "recovery should clear the part-built frame");
+}
+
 static void testSequenceWraparound(void) {
     printf("RTP sequence number wraparound\n");
     Harness *harness = [[Harness alloc] init];
@@ -247,7 +306,7 @@ static void testSequenceWraparound(void) {
     depacketizer.delegate = harness;
 
     // Start just below the 16-bit rollover so the run crosses 65535 -> 0.
-    Sender sender = { depacketizer, 65530, 0x1234, LS_DEFAULT_MTU_PAYLOAD, -1, 0 };
+    Sender sender = { depacketizer, 65530, 0x1234, LS_DEFAULT_MTU_PAYLOAD, -1, 0, 0 };
 
     NSData *sps = makeNAL(0x67, 20, 1);
     NSData *pps = makeNAL(0x68, 8, 2);
@@ -361,6 +420,7 @@ int main(void) {
         testSingleAndFragmented();
         testLossAndRecovery();
         testSequenceWraparound();
+        testStalledPartialFrame();
         testControlMessages();
         testWakeOnLAN();
 

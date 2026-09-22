@@ -77,6 +77,55 @@ Set the display size to the iMac's native resolution. Once the client has said
 hello, the host shows the resolution the client reported and offers a **Match**
 button.
 
+## Tested devices
+
+| Role | Machine | OS | Status |
+|---|---|---|---|
+| Host | MacBook Pro (M1 Pro) | macOS 27.0 | Working |
+| Client | iMac 21.5-inch, Mid 2010 | OS X 10.9.5, Xcode 6.2 | Working |
+
+Confirmed on that pair: the client builds under Xcode 6.2 against the 10.9 SDK,
+decodes in hardware, and displays the MacBook's screen over a direct Gigabit
+cable.
+
+The 21.5-inch panel is 1920×1080, which happens to be exactly the resolution
+this is tuned for — the stream maps 1:1 with no scaling at either end.
+
+Not tested, in rough order of how likely they are to work:
+
+- **iMac 27-inch, Mid 2010.** Same vintage, but its panel is 2560×1440. That is
+  above what a 2010 GPU decodes comfortably; stream 1080p to it and let the iMac
+  scale, rather than matching its native resolution.
+- **Other macOS versions on the host.** Needs 12.3+ for ScreenCaptureKit; the
+  virtual display uses private API that could change in any release.
+- **Anything between OS X 10.10 and macOS 12** as a client. The client only
+  needs 10.9 APIs, so it should be fine, but nobody has run it.
+
+## Prebuilt binaries
+
+`build/` holds both apps, if you would rather not compile anything:
+
+| App | Architecture | Minimum OS | Signing |
+|---|---|---|---|
+| `LanScreenHost.app` | arm64 | macOS 13 | Ad-hoc |
+| `LanScreenClient.app` | x86_64 | OS X 10.9 | Unsigned |
+
+The client was built on the iMac itself with Xcode 6.2, because no current
+toolchain can target 10.9 (see section 3).
+
+Neither is notarised, so macOS will quarantine them after download and refuse
+to open them. Clear that with:
+
+```bash
+xattr -dr com.apple.quarantine LanScreenHost.app
+```
+
+On OS X 10.9, right-click the app and choose Open instead.
+
+Screen Recording permission is tied to the code signature, so a downloaded copy
+of the host will ask for it separately from one you built yourself. Building
+from source is still the better path; these are here for convenience.
+
 ## 1. Network setup
 
 Connect the two machines with a single Ethernet cable. Both ends auto-MDIX, so
@@ -434,8 +483,8 @@ video-range mismatch, or a flipped image fails here instead of surprising you
 once the code is on a machine in another room. Opens a window for a second or
 two.
 
-It leaves `build/LanScreenClient.app` as a native binary — re-run
-`./Client/build.sh` on the iMac for the real 10.9 build.
+It builds its client into a temporary directory, so the real 10.9 binary in
+`build/` is left alone.
 
 ### Full host, real client, one machine
 

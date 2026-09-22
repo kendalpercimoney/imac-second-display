@@ -56,13 +56,17 @@ echo "==> building pattern checker"
 xcrun clang -fobjc-arc -O1 -framework Foundation -framework CoreGraphics \
     -framework ImageIO "$ROOT/Tests/checkpattern.m" -o "$OUT/checkpattern"
 
-echo "==> building the client for this Mac (arm64/native, not the iMac build)"
-ARCH="$(uname -m)" MIN_VERSION=14.0 "$ROOT/Client/build.sh" > "$OUT/clientbuild.log" 2>&1 \
+echo "==> building a throwaway native client (not the 10.9 binary in build/)"
+# OUT_DIR keeps this out of build/, which holds the real x86_64 client built on
+# the iMac and tracked in git. Overwriting that with an arm64 binary would be a
+# quiet and confusing way to break the published download.
+ARCH="$(uname -m)" MIN_VERSION=14.0 OUT_DIR="$OUT/nativeclient" \
+    "$ROOT/Client/build.sh" > "$OUT/clientbuild.log" 2>&1 \
     || { cat "$OUT/clientbuild.log"; exit 1; }
 
 echo "==> running (a window will open briefly)"
 rm -f "$SNAPSHOT"
-"$ROOT/build/LanScreenClient.app/Contents/MacOS/LanScreenClient" \
+"$OUT/nativeclient/LanScreenClient.app/Contents/MacOS/LanScreenClient" \
     -host 127.0.0.1 -videoPort "$PORT" -windowed YES \
     -snapshot "$SNAPSHOT" -snapshotAfter 40 > "$OUT/client.log" 2>&1 &
 CLIENT=$!
@@ -76,6 +80,3 @@ echo
 echo
 echo "snapshot: $SNAPSHOT"
 
-echo
-echo "NOTE: build/LanScreenClient.app is now a native binary for this Mac."
-echo "      Re-run ./Client/build.sh on the iMac for the real 10.9 build."

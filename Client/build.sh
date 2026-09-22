@@ -28,7 +28,9 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/build"
+# Overridable so the render test can build a throwaway native client without
+# clobbering the real 10.9 binary that ships in build/.
+OUT="${OUT_DIR:-$ROOT/build}"
 APP="$OUT/LanScreenClient.app"
 
 # ---------------------------------------------------------------- toolchain --

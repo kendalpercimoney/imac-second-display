@@ -1,8 +1,10 @@
 # SwiftPM build products
 .build/
 
-# Assembled .app bundles and the loopback test's scratch output
-build/
+# Ship the two app bundles, but nothing else that lands in build/
+build/*
+!build/LanScreenHost.app/
+!build/LanScreenClient.app/
 
 # macOS
 .DS_Store

@@ -266,16 +266,72 @@ static void testSequenceWraparound(void) {
     CHECK(harness.keyframeRequests == 0, "wraparound triggered a keyframe request");
 }
 
+static void testWakeOnLAN(void) {
+    printf("Wake-on-LAN magic packet and MAC parsing\n");
+
+    uint8_t mac[6] = {0xC4, 0x2C, 0x03, 0x07, 0x35, 0x10};
+    uint8_t packet[LS_WOL_PACKET_SIZE];
+
+    size_t n = ls_wol_build_magic_packet(packet, sizeof(packet), mac);
+    CHECK(n == LS_WOL_PACKET_SIZE, "magic packet should be 102 bytes, got %lu",
+          (unsigned long)n);
+
+    // Six 0xFF sync bytes, then the MAC sixteen times. A NIC in sleep scans for
+    // exactly this byte pattern, so any deviation means it simply will not wake.
+    int i;
+    for (i = 0; i < 6; i++) {
+        CHECK(packet[i] == 0xFF, "sync byte %d should be 0xFF, got 0x%02X", i, packet[i]);
+    }
+    for (i = 0; i < 16; i++) {
+        CHECK(memcmp(packet + 6 + i * 6, mac, 6) == 0,
+              "MAC repetition %d does not match", i);
+    }
+    CHECK(ls_wol_build_magic_packet(packet, 10, mac) == 0,
+          "should refuse to write into a buffer that is too small");
+    CHECK(ls_wol_build_magic_packet(packet, sizeof(packet), NULL) == 0,
+          "should refuse a NULL MAC");
+
+    // Parsing, including the single-digit octets that `arp` prints.
+    uint8_t parsed[6];
+    CHECK(ls_parse_mac("c4:2c:03:07:35:10", parsed) == 0 &&
+          memcmp(parsed, mac, 6) == 0, "colon-separated MAC did not parse");
+    CHECK(ls_parse_mac("c4:2c:3:7:35:10", parsed) == 0 &&
+          memcmp(parsed, mac, 6) == 0, "arp-style short octets did not parse");
+    CHECK(ls_parse_mac("C4-2C-03-07-35-10", parsed) == 0 &&
+          memcmp(parsed, mac, 6) == 0, "dash-separated uppercase MAC did not parse");
+
+    CHECK(ls_parse_mac("not a mac", parsed) != 0, "garbage was accepted as a MAC");
+    CHECK(ls_parse_mac("c4:2c:03:07:35", parsed) != 0, "five octets were accepted");
+    CHECK(ls_parse_mac("c4:2c:03:07:35:10:99", parsed) != 0, "seven octets were accepted");
+    CHECK(ls_parse_mac("", parsed) != 0, "empty string was accepted");
+
+    char text[18];
+    CHECK(ls_format_mac(text, sizeof(text), mac) == 17 &&
+          strcmp(text, "c4:2c:03:07:35:10") == 0,
+          "formatting produced '%s'", text);
+    CHECK(ls_format_mac(text, 4, mac) == 0, "should refuse a buffer that is too small");
+}
+
 static void testControlMessages(void) {
     printf("control message round trips\n");
     uint8_t buffer[LS_CTRL_MAX_SIZE];
     ls_ctrl_message message;
 
-    size_t n = ls_ctrl_build_hello(buffer, sizeof(buffer), 1920, 1200, 5000, 7);
+    size_t n = ls_ctrl_build_hello(buffer, sizeof(buffer), 1920, 1200, 5000, 7, NULL);
     CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "hello did not parse");
     CHECK(message.type == LS_MSG_HELLO && message.screen_width == 1920 &&
           message.screen_height == 1200 && message.video_port == 5000 &&
           message.flags == 7, "hello fields did not survive");
+    CHECK(message.has_mac == 0, "a hello without a MAC claimed to have one");
+
+    // With a MAC, and the older fields must still land in the same places.
+    uint8_t mac[6] = {0xC4, 0x2C, 0x03, 0x07, 0x35, 0x10};
+    n = ls_ctrl_build_hello(buffer, sizeof(buffer), 1920, 1200, 5000, 7, mac);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "hello with MAC did not parse");
+    CHECK(message.screen_width == 1920 && message.video_port == 5000,
+          "adding a MAC disturbed the earlier hello fields");
+    CHECK(message.has_mac == 1 && memcmp(message.mac, mac, 6) == 0,
+          "MAC did not survive the round trip");
 
     n = ls_ctrl_build_ping(buffer, sizeof(buffer), 0x0123456789ABCDEFULL);
     CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "ping did not parse");
@@ -306,6 +362,7 @@ int main(void) {
         testLossAndRecovery();
         testSequenceWraparound();
         testControlMessages();
+        testWakeOnLAN();
 
         if (gFailures == 0) {
             printf("\nAll depacketizer tests passed.\n");

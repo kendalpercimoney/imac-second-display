@@ -19,6 +19,7 @@
 #import "LSDecoder.h"
 #import "LSDepacketizer.h"
 #import "LSControlClient.h"
+#import "LSPowerManager.h"
 
 @implementation LSWindow
 - (BOOL)canBecomeKeyWindow { return YES; }
@@ -48,6 +49,7 @@
     LSDecoder       *_decoder;
     LSDepacketizer  *_depacketizer;
     LSControlClient *_control;
+    LSPowerManager  *_power;
 
     NSString *_hostAddress;
     uint16_t  _videoPort;
@@ -207,6 +209,7 @@
 #pragma mark - pipeline
 
 - (void)startPipeline {
+    _power = [[LSPowerManager alloc] init];
     _depacketizer = [[LSDepacketizer alloc] init];
     _depacketizer.delegate = self;
 
@@ -250,6 +253,9 @@
 - (void)handleHostDisconnected {
     if (!_sawFirstFrame) return;
     _sawFirstFrame = NO;
+    // Stop holding the machine awake: with nothing to show, the iMac should be
+    // free to sleep on its own schedule.
+    [_power endKeepingAwake];
     [_depacketizer reset];
     [_glView clear];
     [self updateOverlay];
@@ -271,8 +277,21 @@
              timestamp:(uint32_t)timestamp
             isKeyframe:(BOOL)isKeyframe
 {
-    _sawFirstFrame = YES;
+    if (!_sawFirstFrame) {
+        _sawFirstFrame = YES;
+        // On the receive thread; power management belongs on main.
+        [self performSelectorOnMainThread:@selector(handleStreamStarted)
+                               withObject:nil waitUntilDone:NO];
+    }
     [_decoder submitAccessUnit:avcc sps:sps pps:pps timestamp:timestamp];
+}
+
+/// A stream just started arriving. Light the screen if it has already slept,
+/// and hold it awake for as long as the stream lasts.
+- (void)handleStreamStarted {
+    [_power wakeDisplayNow];
+    [_power beginKeepingAwake];
+    [self updateOverlay];
 }
 
 - (void)depacketizerNeedsKeyframe:(LSDepacketizer *)depacketizer {
@@ -358,6 +377,10 @@
             [_decoder decodeMicroseconds] / 1000.0,
             [_glView renderMicroseconds] / 1000.0,
             _glView.vsyncEnabled ? @"on" : @"off"];
+        [text appendFormat:@"awake assertion %@   mac %@\n",
+            _power.isKeepingAwake ? @"held" : @"released",
+            _control.localMACString ?: @"unknown"];
+        if (_power.statusMessage) [text appendFormat:@"%@\n", _power.statusMessage];
     }
 
     if ([text length] == 0) {
@@ -458,6 +481,7 @@
 - (void)applicationWillTerminate:(NSNotification *)notification {
     [_tickTimer invalidate];
     _tickTimer = nil;
+    [_power endKeepingAwake];
     [_receiver stop];
     [_control stop];
     [_decoder stop];

@@ -59,6 +59,15 @@ final class StreamSettings: ObservableObject {
     /// back-channel; long GOPs save bandwidth. 2s is a reasonable middle.
     @Published var keyframeSeconds: Double { didSet { save(keyframeSeconds, "keyframeSeconds") } }
 
+    /// Send a Wake-on-LAN magic packet when streaming starts, and again when
+    /// this Mac wakes from sleep.
+    @Published var wakeClientAutomatically: Bool { didSet { save(wakeClientAutomatically, "wakeClientAutomatically") } }
+    /// The client's hardware address. Learned from its HELLO, or typed in.
+    @Published var clientMACAddress: String { didSet { save(clientMACAddress, "clientMACAddress") } }
+    /// Stop streaming when this Mac sleeps, so the iMac releases its
+    /// keep-awake assertion and can sleep too.
+    @Published var stopOnSleep: Bool { didSet { save(stopOnSleep, "stopOnSleep") } }
+
     private let defaults = UserDefaults.standard
     private func save(_ value: Any, _ key: String) { defaults.set(value, forKey: "ls." + key) }
 
@@ -84,6 +93,9 @@ final class StreamSettings: ObservableObject {
         source          = Source(rawValue: d.string(forKey: "ls.source") ?? "") ?? .virtualDisplay
         hiDPI           = d.object(forKey: "ls.hiDPI") as? Bool ?? false
         keyframeSeconds = dbl("keyframeSeconds", 2.0)
+        wakeClientAutomatically = d.object(forKey: "ls.wakeClientAutomatically") as? Bool ?? true
+        clientMACAddress = d.string(forKey: "ls.clientMACAddress") ?? ""
+        stopOnSleep = d.object(forKey: "ls.stopOnSleep") as? Bool ?? true
     }
 
     var bitrateBitsPerSecond: Int { Int(bitrateMbps * 1_000_000) }

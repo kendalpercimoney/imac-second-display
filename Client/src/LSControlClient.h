@@ -45,4 +45,9 @@
 
 @property (nonatomic, readonly) NSTimeInterval lastHostContact;
 
+/// The MAC of the interface we are reaching the host over, as "c4:2c:03:07:35:10",
+/// or nil if it could not be determined. Sent to the host in HELLO so it can
+/// wake this machine later.
+@property (nonatomic, readonly) NSString *localMACString;
+
 @end

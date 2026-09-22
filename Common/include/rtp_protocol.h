@@ -136,6 +136,11 @@ typedef struct {
     uint16_t screen_height;
     uint16_t video_port;        /* where the client wants RTP delivered       */
     uint16_t flags;
+    /* The client's Ethernet MAC on the link it is talking to us over, so the
+     * host can wake it with a magic packet later. has_mac is 0 on a HELLO from
+     * an older client that did not send one. */
+    uint8_t  mac[6];
+    uint8_t  has_mac;
     /* PING / PONG */
     uint64_t token;
     /* STATS */
@@ -144,9 +149,11 @@ typedef struct {
 
 /* Each builder returns the number of bytes written, or 0 if cap was too small.
  * cap should be at least LS_CTRL_MAX_SIZE. */
+/* `mac` may be NULL, in which case the shorter legacy HELLO is written. */
 size_t ls_ctrl_build_hello(uint8_t *dst, size_t cap,
                            uint16_t width, uint16_t height,
-                           uint16_t video_port, uint16_t flags);
+                           uint16_t video_port, uint16_t flags,
+                           const uint8_t *mac);
 size_t ls_ctrl_build_bye(uint8_t *dst, size_t cap);
 size_t ls_ctrl_build_keyframe_req(uint8_t *dst, size_t cap);
 size_t ls_ctrl_build_stats(uint8_t *dst, size_t cap, const ls_stats *stats);
@@ -156,6 +163,23 @@ size_t ls_ctrl_build_pong(uint8_t *dst, size_t cap, uint64_t token);
 /* Returns 0 on success, -1 if the datagram is not one of ours. Unknown message
  * types are rejected so a stray packet can never be mistaken for a command. */
 int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out);
+
+/* ---------------------------------------------------------- Wake-on-LAN --- */
+
+#define LS_WOL_PACKET_SIZE 102   /* 6 sync bytes + the MAC repeated 16 times */
+#define LS_WOL_PORT        9     /* the discard port, by convention          */
+
+/* Builds a magic packet for `mac`. Returns LS_WOL_PACKET_SIZE, or 0 if cap is
+ * too small. The packet is not IP-specific: it is recognised by the NIC itself,
+ * which is why it can wake a machine whose OS is asleep. */
+size_t ls_wol_build_magic_packet(uint8_t *dst, size_t cap, const uint8_t *mac);
+
+/* Parses "c4:2c:03:07:35:10" or "c4-2c-3-7-35-10" into six bytes.
+ * Returns 0 on success, -1 if the string is not a MAC. */
+int ls_parse_mac(const char *text, uint8_t *out);
+
+/* Formats six bytes as "c4:2c:03:07:35:10". `cap` must be at least 18. */
+size_t ls_format_mac(char *dst, size_t cap, const uint8_t *mac);
 
 #ifdef __cplusplus
 }

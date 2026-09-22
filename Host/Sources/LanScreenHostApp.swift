@@ -50,6 +50,7 @@ struct ContentView: View {
                 destinationSection
                 videoSection
                 networkSection
+                powerSection
                 Divider()
                 statsSection
                 if let error = controller.lastError { errorBox(error) }
@@ -226,6 +227,48 @@ struct ContentView: View {
                         Text("open with VLC to verify the stream locally")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                }
+            }
+            .padding(6)
+        }
+    }
+
+    private var powerSection: some View {
+        GroupBox("Power") {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Wake the client when streaming starts and when this Mac wakes",
+                       isOn: $settings.wakeClientAutomatically)
+                Toggle("Stop streaming when this Mac sleeps", isOn: $settings.stopOnSleep)
+                    .help("Lets the client drop its keep-awake assertion so the iMac "
+                          + "can sleep too, instead of sitting lit up showing a frozen frame.")
+
+                HStack {
+                    Text("Client MAC")
+                    TextField("c4:2c:03:07:35:10", text: $settings.clientMACAddress)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(width: 180)
+                    Button("Wake now") { controller.wakeClient(reason: "Manual") }
+                        .disabled(settings.clientMACAddress.isEmpty)
+                }
+
+                Label("Filled in automatically the first time the client connects. "
+                      + "macOS hides hardware addresses from apps, so this Mac cannot "
+                      + "look it up on its own — to set it before the first connection, "
+                      + "run `arp -n \(settings.clientAddress)` in Terminal and paste the result.",
+                      systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                Label("On the iMac, tick Energy Saver ▸ \"Wake for network access\", or the "
+                      + "magic packet will be ignored.",
+                      systemImage: "bolt")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                if !controller.wakeStatus.isEmpty {
+                    Text(controller.wakeStatus)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(6)

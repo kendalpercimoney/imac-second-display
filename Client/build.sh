@@ -130,6 +130,7 @@ SOURCES=(
     "$ROOT/Client/src/LSDecoder.m"
     "$ROOT/Client/src/LSDepacketizer.m"
     "$ROOT/Client/src/LSControlClient.m"
+    "$ROOT/Client/src/LSPowerManager.m"
 )
 
 # -fobjc-arc is fine on 10.9; weak references need 10.7+ and we are well past.
@@ -153,6 +154,7 @@ SOURCES=(
     -framework IOSurface \
     -framework ImageIO \
     -framework CoreServices \
+    -framework IOKit \
     "${SOURCES[@]}" \
     -o "$APP/Contents/MacOS/LanScreenClient"
 

@@ -30,6 +30,9 @@ final class ControlChannel {
         var address: String = "—"
         var screenWidth: Int = 0
         var screenHeight: Int = 0
+        /// Reported by the client so we can wake it later, or "" if it could
+        /// not determine its own hardware address.
+        var macAddress: String = ""
         var lastSeen: Date?
         var rttMilliseconds: Double = 0
         var stats = ls_stats()
@@ -46,6 +49,8 @@ final class ControlChannel {
     var onKeyframeRequested: (() -> Void)?
     /// Fired on the receive thread when a client introduces itself.
     var onClientHello: (() -> Void)?
+    /// Fired on the receive thread when a client reports a usable MAC address.
+    var onClientMAC: ((String) -> Void)?
     /// Fired on the main queue whenever client state changes.
     var onStateChanged: ((ClientState) -> Void)?
 
@@ -124,11 +129,24 @@ final class ControlChannel {
     private func handle(_ message: ls_ctrl_message, from: sockaddr_in, socket: UDPBoundSocket) {
         switch Int(message.type) {
         case LS_MSG_HELLO:
+            var reportedMAC = ""
+            if message.has_mac != 0 {
+                var bytes = message.mac
+                var text = [CChar](repeating: 0, count: 18)
+                _ = withUnsafePointer(to: &bytes) { macPointer in
+                    macPointer.withMemoryRebound(to: UInt8.self, capacity: 6) {
+                        ls_format_mac(&text, text.count, $0)
+                    }
+                }
+                reportedMAC = String(cString: text)
+            }
             lock.lock()
             state.screenWidth = Int(message.screen_width)
             state.screenHeight = Int(message.screen_height)
+            if !reportedMAC.isEmpty { state.macAddress = reportedMAC }
             lock.unlock()
             onClientHello?()
+            if !reportedMAC.isEmpty { onClientMAC?(reportedMAC) }
             publishState()
 
         case LS_MSG_KEYFRAME_REQ:

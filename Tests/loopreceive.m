@@ -70,9 +70,12 @@ int main(int argc, const char *argv[]) {
 
         LSDecoder *decoder = [[LSDecoder alloc] init];
         harness.decoder = decoder;
+        // The decoder owns the block, so capture it weakly or the two keep each
+        // other alive.
+        __unsafe_unretained LSDecoder *weakDecoder = decoder;
         decoder.frameHandler = ^(CVPixelBufferRef pixelBuffer, CMTime presentationTime) {
             if (harness.pixelBuffers == 0) {
-                harness.dropsAtFirstFrame = [decoder framesDropped];
+                harness.dropsAtFirstFrame = [weakDecoder framesDropped];
             }
             harness.pixelBuffers++;
 

@@ -20,6 +20,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <net/if_dl.h>
 
 @implementation LSControlClient {
     NSString *_host;
@@ -29,6 +32,8 @@
     volatile BOOL _running;
     NSTimeInterval _lastKeyframeRequest;
     NSLock *_sendLock;
+    uint8_t _localMAC[6];
+    BOOL _haveLocalMAC;
 }
 
 - (id)initWithHost:(NSString *)host port:(uint16_t)port {
@@ -78,11 +83,91 @@
         return NO;
     }
 
+    [self discoverLocalMAC];
+
     _running = YES;
     _thread = [[NSThread alloc] initWithTarget:self selector:@selector(receiveLoop) object:nil];
     [_thread setName:@"com.lanscreen.control"];
     [_thread start];
     return YES;
+}
+
+/// Works out which NIC we are actually reaching the host over, and reads its
+/// hardware address.
+///
+/// Guessing "en0" would be wrong often enough to matter: on this machine the
+/// direct link might be built-in Ethernet, a Thunderbolt adapter or a USB one.
+/// Asking the kernel which local address the connected socket ended up with
+/// removes the guesswork, and the MAC we report is then guaranteed to be the
+/// NIC that will have to hear the magic packet.
+- (void)discoverLocalMAC {
+    _haveLocalMAC = NO;
+
+    struct sockaddr_in local;
+    socklen_t length = sizeof(local);
+    memset(&local, 0, sizeof(local));
+    if (getsockname(_fd, (struct sockaddr *)&local, &length) != 0) {
+        NSLog(@"[LanScreen] getsockname failed: %s", strerror(errno));
+        return;
+    }
+
+    struct ifaddrs *addresses = NULL;
+    if (getifaddrs(&addresses) != 0) {
+        NSLog(@"[LanScreen] getifaddrs failed: %s", strerror(errno));
+        return;
+    }
+
+    char wanted[IFNAMSIZ];
+    memset(wanted, 0, sizeof(wanted));
+
+    struct ifaddrs *entry;
+    for (entry = addresses; entry; entry = entry->ifa_next) {
+        if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_INET) continue;
+        struct sockaddr_in *candidate = (struct sockaddr_in *)entry->ifa_addr;
+        if (candidate->sin_addr.s_addr == local.sin_addr.s_addr) {
+            strncpy(wanted, entry->ifa_name, sizeof(wanted) - 1);
+            break;
+        }
+    }
+
+    if (wanted[0]) {
+        for (entry = addresses; entry; entry = entry->ifa_next) {
+            if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_LINK) continue;
+            if (strcmp(entry->ifa_name, wanted) != 0) continue;
+            struct sockaddr_dl *link = (struct sockaddr_dl *)entry->ifa_addr;
+            if (link->sdl_alen == 6) {
+                const uint8_t *bytes = (const uint8_t *)LLADDR(link);
+                // macOS 11 and later hand unentitled apps a masked placeholder
+                // (02:00:00:00:00:00) instead of the real hardware address.
+                // OS X 10.9 has no such restriction, so this should never fire
+                // on the intended target -- but sending a placeholder to the
+                // host would have it store a wake address that can never work,
+                // which is worse than admitting we do not know.
+                static const uint8_t masked[6] = {0x02, 0, 0, 0, 0, 0};
+                static const uint8_t zero[6]   = {0, 0, 0, 0, 0, 0};
+                if (memcmp(bytes, masked, 6) == 0 || memcmp(bytes, zero, 6) == 0) {
+                    NSLog(@"[LanScreen] the OS masked this machine's MAC address; "
+                          @"not reporting it to the host");
+                } else {
+                    memcpy(_localMAC, bytes, 6);
+                    _haveLocalMAC = YES;
+                }
+            }
+            break;
+        }
+    }
+
+    freeifaddrs(addresses);
+
+    if (_haveLocalMAC) {
+        char text[18];
+        ls_format_mac(text, sizeof(text), _localMAC);
+        _localMACString = [NSString stringWithUTF8String:text];
+        NSLog(@"[LanScreen] reaching the host over %s (%@)", wanted, _localMACString);
+    } else {
+        NSLog(@"[LanScreen] could not determine this machine's MAC; "
+              @"the host will not be able to wake it automatically");
+    }
 }
 
 - (void)stop {
@@ -110,7 +195,8 @@
 
 - (void)sendHelloWithWidth:(uint16_t)width height:(uint16_t)height videoPort:(uint16_t)videoPort {
     uint8_t buffer[LS_CTRL_MAX_SIZE];
-    size_t n = ls_ctrl_build_hello(buffer, sizeof(buffer), width, height, videoPort, 0);
+    size_t n = ls_ctrl_build_hello(buffer, sizeof(buffer), width, height, videoPort, 0,
+                                   _haveLocalMAC ? _localMAC : NULL);
     [self sendBytes:buffer length:n];
 }
 

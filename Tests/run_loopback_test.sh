@@ -69,9 +69,24 @@ xcrun clang -fobjc-arc -O1 -Wall -Wno-unused-parameter \
     "$ROOT/Tests/depacketizer_test.m" \
     -o "$OUT/lsdepacketizertest"
 
+echo "==> building the Wake-on-LAN check"
+xcrun swiftc -O \
+    -Xcc -fmodule-map-file="$ROOT/Common/include/module.modulemap" \
+    -Xcc -I"$ROOT/Common/include" \
+    -I "$ROOT/Common/include" \
+    "$OUT/rtp_protocol.o" \
+    "$ROOT/Host/Sources/UDPSocket.swift" \
+    "$ROOT/Host/Sources/WakeOnLAN.swift" \
+    "$ROOT/Tests/WakeCheck/main.swift" \
+    -o "$OUT/wakecheck"
+
 echo
 echo "==> unit tests"
 "$OUT/lsdepacketizertest"
+
+echo
+echo "==> Wake-on-LAN"
+"$OUT/wakecheck" "${CLIENT_IP:-10.0.0.2}" "${CLIENT_MAC:-c4:2c:03:07:35:10}"
 
 echo
 echo "==> loopback: encode -> RTP -> UDP -> depacketize -> decode"

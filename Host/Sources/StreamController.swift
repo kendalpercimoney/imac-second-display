@@ -18,6 +18,7 @@ import CoreMedia
 import CoreVideo
 import LSProtocol
 import LSVirtualDisplay
+import AppKit
 
 /// Wires capture -> encode -> packetize -> socket together, and owns the policy
 /// that keeps the stream alive: idle heartbeat, keyframe on demand, stats.
@@ -44,6 +45,7 @@ final class StreamController: ObservableObject {
     @Published private(set) var keyframeRequests: Int = 0
     @Published private(set) var sdpPath: String?
     @Published private(set) var activeSourceDescription: String = ""
+    @Published private(set) var wakeStatus: String = ""
     @Published var displays: [DisplayInfo] = []
 
     var virtualDisplaySupported: Bool { LSVirtualDisplay.isSupported() }
@@ -63,6 +65,8 @@ final class StreamController: ObservableObject {
 
     private var idleTimer: DispatchSourceTimer?
     private var statsTimer: Timer?
+    private var wakeRetryTimer: DispatchSourceTimer?
+    private var sleepObservers: [NSObjectProtocol] = []
 
     private var snapshotBuffer: CVPixelBuffer?
     private var lastSnapshotTime: TimeInterval = 0
@@ -78,7 +82,85 @@ final class StreamController: ObservableObject {
     private var pipelineSamplesThisPeriod = 0
     private var bytesAtPeriodStart: UInt64 = 0
 
-    init(settings: StreamSettings) { self.settings = settings }
+    init(settings: StreamSettings) {
+        self.settings = settings
+        installSleepWakeObservers()
+    }
+
+    deinit {
+        for observer in sleepObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+    }
+
+    // MARK: - sleep and wake
+
+    /// The iMac should follow this Mac: wake with it, and be allowed to sleep
+    /// when it sleeps.
+    private func installSleepWakeObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+
+        sleepObservers.append(center.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            guard self.settings.wakeClientAutomatically else { return }
+            // The Ethernet link has to renegotiate after wake, which takes a
+            // moment; a packet sent immediately goes nowhere. Retrying for a
+            // while covers both that and an iMac that is slow to come up.
+            self.wakeClient(reason: "this Mac woke")
+            self.startWakeRetries()
+        })
+
+        sleepObservers.append(center.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.settings.stopOnSleep, self.isRunning else { return }
+            // Stopping sends BYE, which makes the client drop its keep-awake
+            // assertion so the iMac can sleep too instead of sitting lit up all
+            // night showing a frozen frame.
+            self.stop()
+        })
+    }
+
+    /// Sends a magic packet, if we know where to send it.
+    @discardableResult
+    func wakeClient(reason: String) -> Bool {
+        let mac = settings.clientMACAddress.trimmingCharacters(in: .whitespaces)
+        guard !mac.isEmpty else {
+            onMain { self.wakeStatus = "No MAC address for the client yet, so it cannot be woken." }
+            return false
+        }
+        let result = WakeOnLAN.wake(macAddress: mac, clientAddress: settings.clientAddress)
+        onMain { self.wakeStatus = "\(reason): \(result.summary)" }
+        return result.error == nil
+    }
+
+    /// Keeps knocking until the client says hello, or we give up.
+    private func startWakeRetries() {
+        wakeRetryTimer?.cancel()
+        guard settings.wakeClientAutomatically,
+              !settings.clientMACAddress.isEmpty else { return }
+
+        var attemptsLeft = 10          // 10 tries, 3s apart, ~30 seconds
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 3.0, repeating: 3.0)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            // Stop as soon as the client is talking to us again.
+            let seen = self.client.lastSeen.map { Date().timeIntervalSince($0) < 5 } ?? false
+            attemptsLeft -= 1
+            if seen || attemptsLeft <= 0 {
+                self.wakeRetryTimer?.cancel()
+                self.wakeRetryTimer = nil
+                if seen { self.onMain { self.wakeStatus = "Client is awake and connected." } }
+                return
+            }
+            _ = self.wakeClient(reason: "Waking the client (\(attemptsLeft) tries left)")
+        }
+        timer.resume()
+        wakeRetryTimer = timer
+    }
 
     private func onMain(_ block: @escaping () -> Void) {
         if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
@@ -109,6 +191,13 @@ final class StreamController: ObservableObject {
             self.statusText = "Starting…"
         }
         sdpWritten = false
+
+        // Knock before we start: if the iMac is asleep there is no point
+        // streaming into the void.
+        if settings.wakeClientAutomatically && !settings.clientMACAddress.isEmpty {
+            wakeClient(reason: "Starting")
+            startWakeRetries()
+        }
 
         Task {
             do {
@@ -162,6 +251,15 @@ final class StreamController: ObservableObject {
             guard let self else { return }
             self.encodeQueue.async { self.forceKeyframeFlag = true }
             self.onMain { self.keyframeRequests += 1 }
+        }
+        control.onClientMAC = { [weak self] mac in
+            guard let self else { return }
+            self.onMain {
+                if self.settings.clientMACAddress.caseInsensitiveCompare(mac) != .orderedSame {
+                    self.settings.clientMACAddress = mac
+                    self.wakeStatus = "Learned the client's MAC address: \(mac)"
+                }
+            }
         }
         control.onClientHello = { [weak self] in
             guard let self else { return }
@@ -270,6 +368,7 @@ final class StreamController: ObservableObject {
 
     private func teardown() async {
         idleTimer?.cancel(); idleTimer = nil
+        wakeRetryTimer?.cancel(); wakeRetryTimer = nil
         await MainActor.run { self.statsTimer?.invalidate(); self.statsTimer = nil }
 
         let captureRef = encodeQueue.sync { self.capture }

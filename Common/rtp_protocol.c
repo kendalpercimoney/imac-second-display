@@ -151,14 +151,23 @@ static size_t ctrl_begin(uint8_t *dst, size_t cap, uint8_t type, size_t body)
 
 size_t ls_ctrl_build_hello(uint8_t *dst, size_t cap,
                            uint16_t width, uint16_t height,
-                           uint16_t video_port, uint16_t flags)
+                           uint16_t video_port, uint16_t flags,
+                           const uint8_t *mac)
 {
-    size_t total = ctrl_begin(dst, cap, LS_MSG_HELLO, 8);
+    /* The MAC is appended rather than inserted, so a parser that only knows
+     * the 8-byte body still reads the first four fields correctly. */
+    size_t body = mac ? 16 : 8;
+    size_t total = ctrl_begin(dst, cap, LS_MSG_HELLO, body);
     if (!total) return 0;
     put_u16(dst + CTRL_HDR + 0, width);
     put_u16(dst + CTRL_HDR + 2, height);
     put_u16(dst + CTRL_HDR + 4, video_port);
     put_u16(dst + CTRL_HDR + 6, flags);
+    if (mac) {
+        memcpy(dst + CTRL_HDR + 8, mac, 6);
+        dst[CTRL_HDR + 14] = 0;
+        dst[CTRL_HDR + 15] = 0;
+    }
     return total;
 }
 
@@ -231,6 +240,10 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
             out->screen_height = get_u16(src + CTRL_HDR + 2);
             out->video_port    = get_u16(src + CTRL_HDR + 4);
             out->flags         = get_u16(src + CTRL_HDR + 6);
+            if (body >= 14) {
+                memcpy(out->mac, src + CTRL_HDR + 8, 6);
+                out->has_mac = 1;
+            }
             return 0;
 
         case LS_MSG_BYE:
@@ -258,4 +271,70 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
         default:
             return -1;   /* unknown type -- never treat a stray packet as a command */
     }
+}
+
+/* ---------------------------------------------------------- Wake-on-LAN --- */
+
+size_t ls_wol_build_magic_packet(uint8_t *dst, size_t cap, const uint8_t *mac)
+{
+    int i;
+    if (!dst || !mac || cap < LS_WOL_PACKET_SIZE) return 0;
+    memset(dst, 0xFF, 6);
+    for (i = 0; i < 16; i++) {
+        memcpy(dst + 6 + (size_t)i * 6, mac, 6);
+    }
+    return LS_WOL_PACKET_SIZE;
+}
+
+static int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+int ls_parse_mac(const char *text, uint8_t *out)
+{
+    int octet = 0;
+    const char *p = text;
+
+    if (!text || !out) return -1;
+
+    while (octet < 6) {
+        int high, low, next;
+        while (*p == ' ') p++;
+        high = hex_value(*p);
+        if (high < 0) return -1;
+        p++;
+        low = hex_value(*p);
+        if (low < 0) {
+            /* Single-digit octet, as `arp` prints for values under 0x10. */
+            out[octet] = (uint8_t)high;
+        } else {
+            out[octet] = (uint8_t)((high << 4) | low);
+            p++;
+        }
+        octet++;
+        if (octet == 6) break;
+        next = *p;
+        if (next != ':' && next != '-') return -1;
+        p++;
+    }
+    while (*p == ' ') p++;
+    return (*p == '\0' && octet == 6) ? 0 : -1;
+}
+
+size_t ls_format_mac(char *dst, size_t cap, const uint8_t *mac)
+{
+    static const char digits[] = "0123456789abcdef";
+    int i;
+    if (!dst || !mac || cap < 18) return 0;
+    for (i = 0; i < 6; i++) {
+        dst[i * 3]     = digits[(mac[i] >> 4) & 0x0F];
+        dst[i * 3 + 1] = digits[mac[i] & 0x0F];
+        if (i < 5) dst[i * 3 + 2] = ':';
+    }
+    dst[17] = '\0';
+    return 17;
 }

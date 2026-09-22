@@ -53,7 +53,7 @@ capture is the floor before anything else happens.
 
 VLC defaults to `--network-caching=1000`, a **one second** jitter buffer. That
 is almost exactly the delay people report when they test this with VLC, and it
-has nothing to do with the pipeline. See section 6 for how to measure properly.
+has nothing to do with the pipeline. See section 7 for how to measure properly.
 
 ## Second monitor, not a mirror
 
@@ -206,7 +206,7 @@ you can build over SSH or from a Terminal window without launching the IDE.
 **This build only works on the iMac.** Current Xcode toolchains no longer ship
 `libarclite_macosx.a`, which ARC needs for a deployment target below 10.11, so
 running the same script on the MacBook stops with an explanation rather than a
-cryptic linker error. To build a test client for the modern Mac, see section 6.
+cryptic linker error. To build a test client for the modern Mac, see section 7.
 
 ### If the build fails
 
@@ -258,7 +258,7 @@ In the host app, pick a **Source**:
 
 - **Virtual display** — creates a headless second monitor. Set the size to the
   iMac's native resolution (1920×1080 for the 21.5", 2560×1440 for the 27" —
-  but see the resolution warning in section 5).
+  but see the resolution warning in section 6).
 - **Existing display** — mirrors a display that already exists, including a
   hardware dummy plug.
 
@@ -312,7 +312,80 @@ defaults write com.lanscreen.client host 10.0.0.1
 | `F` | Toggle fullscreen |
 | `Q` / `Esc` | Quit |
 
-## 5. Tuning
+## 5. Power: staying awake, and waking up
+
+Two separate problems with two separate mechanisms.
+
+### Staying awake while you are using the MacBook
+
+The iMac has no idea anything is happening: nobody is touching its keyboard or
+mouse, so Energy Saver blanks the display on its usual timer and your second
+monitor goes dark mid-sentence.
+
+The client takes an `IOPMAssertionTypePreventUserIdleDisplaySleep` assertion for
+as long as a stream is arriving, and releases it the moment the stream stops. So
+the iMac stays lit while you are using it and sleeps normally when you are not.
+Nothing to configure.
+
+You can see the assertion in the client's statistics overlay (press `S`), or on
+the iMac with:
+
+```bash
+pmset -g assertions
+```
+
+### Waking the iMac when you come back to the MacBook
+
+This uses Wake-on-LAN. The host sends a magic packet — six `0xFF` bytes followed
+by the iMac's MAC address sixteen times — which the network card recognises on
+its own while the rest of the machine is asleep.
+
+**On the iMac, tick Energy Saver ▸ "Wake for network access".** Without it the
+card is powered down in sleep and none of this does anything.
+
+The host sends a magic packet when:
+
+- you press Start,
+- this Mac wakes from sleep,
+- and then every three seconds for about thirty seconds, until the client
+  checks in. The Ethernet link has to renegotiate after a wake, so a single
+  packet sent immediately usually goes nowhere.
+
+It sends to both the iMac's own address and the subnet broadcast, on ports 9 and
+7, because sleeping cards differ in what they will accept. The socket is bound
+to this Mac's address on the direct link, so the packet leaves by the cable
+rather than following the default route out over Wi-Fi.
+
+### The MAC address
+
+The host needs the iMac's MAC and **cannot look it up itself**. Since macOS 11
+hardware addresses are masked from unentitled apps — `getifaddrs`, `arp` and the
+routing `sysctl` all return `02:00:00:00:00:00` or nothing, signed or not.
+
+So the client reports its own. OS X 10.9 predates that restriction, so it reads
+its real address and sends it in the HELLO message; the host stores it and
+reuses it from then on. **Connect once with the iMac awake and waking works from
+then on.**
+
+To set it up before the first connection, run this on the MacBook with the iMac
+awake and paste the result into the host's Client MAC field:
+
+```bash
+arp -n 10.0.0.2
+```
+
+(That works in Terminal, which has permissions the app does not.)
+
+If the client ever reports `02:00:00:00:00:00`, it refuses to send it rather
+than have the host store a wake address that can never work.
+
+### Sleeping together
+
+With "Stop streaming when this Mac sleeps" on, the host sends BYE as the MacBook
+goes to sleep. The client drops its keep-awake assertion and the iMac sleeps on
+its own schedule, instead of sitting lit up all night showing a frozen frame.
+
+## 6. Tuning
 
 Start at **1280×720 @ 60 fps** and work up. The 2010 iMac's GPU decodes 1080p
 in hardware, but how comfortably depends on which GPU it has.
@@ -330,7 +403,7 @@ and it is what the 2010-era hardware decoder handles best. Main profile is
 offered for a few percent better quality per bit, and uses CAVLC entropy coding
 even then for the same reason.
 
-## 6. Testing without the iMac
+## 7. Testing without the iMac
 
 Three levels, fastest first.
 
@@ -399,11 +472,27 @@ ffplay -protocol_whitelist file,udp,rtp -fflags nobuffer -flags low_delay \
 Even then you are measuring that player's presentation timing, not the
 pipeline. Use the real client for a real number.
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 **About a second of delay when testing with VLC** — That is VLC's own
 `--network-caching`, which defaults to 1000 ms. Run it with
-`--network-caching=0`, or better, use the real client (section 6).
+`--network-caching=0`, or better, use the real client (section 7).
+
+**The iMac's screen blanks while I am using it** — The keep-awake assertion is
+not being taken. Check the client overlay (`S`) for "awake assertion held". If
+it says released, the stream is not arriving. If the client logs that it could
+not prevent display sleep, set the iMac's Energy Saver display sleep to Never as
+a workaround.
+
+**The iMac does not wake up** — In order of likelihood: "Wake for network
+access" is not ticked in the iMac's Energy Saver; the host has no MAC address
+for it (check the Power section of the host window); or the MacBook's Ethernet
+adapter has not finished renegotiating. The host retries for thirty seconds
+after a wake, so give it that long. Press "Wake now" to test a single packet —
+it reports which addresses it sent to and from.
+
+**Waking works but the iMac shows nothing** — It woke but the host is not
+streaming. Turn on Start automatically, or press Start.
 
 **Host: "Could not create a virtual display"** — The private API is gone or
 changed on this macOS. Switch Source to "Existing display" and use a hardware
@@ -441,9 +530,11 @@ it does freeze, the heartbeat is not reaching the client.
 `MaxFrameDelayCount` in particular is rejected by the Apple Silicon encoder;
 `RealTime` and `AllowFrameReordering` already do the work that setting would.
 
-## 8. What this does not do
+## 9. What this does not do
 
 - **No audio.** Video only.
+- **No wake from a powered-off iMac.** Wake-on-LAN wakes a sleeping machine, not
+  a shut down one.
 - **No input forwarding.** The iMac is a display, not a control surface.
 - **No encryption.** Plain RTP on a direct cable between two machines you own.
   Do not run this across a network you do not control.
@@ -497,6 +588,9 @@ Client/                  Objective-C, OS X 10.9 SDK
     LSAppDelegate.m      window, overlay, keys
 Host/VirtualDisplay/
   LSVirtualDisplay.m     private CGVirtualDisplay, looked up at runtime
+  WakeOnLAN.swift        magic packets, bound to the direct link
+Client/src/
+  LSPowerManager.m       keeps the iMac awake while a stream is showing
 Tools/
   serve_to_imac.sh       packages the client source and serves it to the iMac
 Tests/
@@ -504,6 +598,7 @@ Tests/
   loopreceive.m          loopback receiver + latency measurement
   LoopSend/main.swift    loopback sender
   checkpattern.m         colour round-trip verification
+  WakeCheck/main.swift   Wake-on-LAN subnet maths and interface selection
   run_loopback_test.sh   headless: unit tests + encode/decode round trip
   run_render_test.sh     the OpenGL path, checked numerically
 ```

@@ -72,8 +72,11 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         // costs zero bandwidth, which is why StreamController keeps its own
         // heartbeat for idle periods.
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(frameRate))
-        // Shallow queue: we would rather drop an old frame than show a late one.
-        config.queueDepth = 3
+        // Shallow, because we would rather drop an old frame than show a late
+        // one -- but not as shallow as it was: StreamController now retains the
+        // most recent frame for the whole session so it can answer a keyframe
+        // request on a still screen, and that holds one buffer out of the pool.
+        config.queueDepth = 5
         config.colorSpaceName = CGColorSpace.sRGB
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)

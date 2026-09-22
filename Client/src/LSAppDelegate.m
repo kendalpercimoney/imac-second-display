@@ -252,6 +252,7 @@
 /// automatically when the host comes back.
 - (void)handleHostDisconnected {
     if (!_sawFirstFrame) return;
+    NSLog(@"[LanScreen] host went quiet -- blanking and waiting for it to come back");
     _sawFirstFrame = NO;
     // Stop holding the machine awake: with nothing to show, the iMac should be
     // free to sleep on its own schedule.
@@ -306,10 +307,30 @@
     _bytesAtLastTick = bytes;
     _incomingMbps = (double)delta * 8.0 / 1000000.0;
 
-    // A silent socket means the host went away without saying goodbye -- it
-    // crashed, or the cable came out. Same treatment as an explicit BYE.
-    if (_sawFirstFrame && [_receiver lastPacketTime] > 0 &&
-        [NSDate timeIntervalSinceReferenceDate] - [_receiver lastPacketTime] > 3.0) {
+    // Is the host still there?
+    //
+    // Silence on the video socket used to be the test, but a still screen now
+    // sends no video at all -- that is the point of the change, since forcing a
+    // keyframe every second cost 4 Mb/s and a full IDR decode to show a picture
+    // that had not changed. So video silence no longer means anything is wrong.
+    //
+    // The control channel pings once a second whether or not anything is being
+    // encoded, so that is the signal. Where there is no control channel we fall
+    // back to the old behaviour: less correct, but better than a frozen frame
+    // that never clears.
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSTimeInterval lastContact;
+    if (_control) {
+        NSTimeInterval video = [_receiver lastPacketTime];
+        NSTimeInterval control = [_control lastHostContact];
+        lastContact = video > control ? video : control;
+    } else {
+        lastContact = [_receiver lastPacketTime];
+    }
+    // Four seconds is three missed pings. Blanking a working screen because one
+    // UDP packet went missing would be far more annoying than noticing a real
+    // disconnect a second later.
+    if (_sawFirstFrame && lastContact > 0 && now - lastContact > 4.0) {
         [self handleHostDisconnected];
     }
 

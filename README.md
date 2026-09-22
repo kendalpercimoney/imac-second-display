@@ -110,6 +110,11 @@ Not tested, in rough order of how likely they are to work:
 | `LanScreenHost.app` | arm64 | macOS 13 | Ad-hoc |
 | `LanScreenClient.app` | x86_64 | OS X 10.9 | Unsigned |
 
+> **The checked-in client binary is from v1.1.0 and is older than the current
+> source.** It predates the idle-traffic change, so pairing it with a current
+> host makes it blank every few seconds on a still screen. Rebuild it on the
+> iMac (`./Client/build.sh`) before using it with a host built from `main`.
+
 The client was built on the iMac itself with Xcode 6.2, because no current
 toolchain can target 10.9 (see section 3).
 
@@ -451,6 +456,41 @@ Baseline profile is the default and the right choice: no CABAC, no B-frames,
 and it is what the 2010-era hardware decoder handles best. Main profile is
 offered for a few percent better quality per bit, and uses CAVLC entropy coding
 even then for the same reason.
+
+### Reducing load on both machines
+
+Measured on a static 1920×1080 desktop, encoding with the real settings:
+
+| Change | Effect |
+|---|---|
+| **A still screen now sends nothing** | Was 4.03 Mb/s and a full IDR decode every second. Now zero. Free — already done |
+| **Keyframe interval 2s → 10s** | 73% less data on a nearly-still screen, and that many fewer decode spikes. Default is 5s |
+| **Jumbo frames** | At 25 Mb/s, 1400-byte packets mean ~2,250 `recv` calls and interrupts per second on the iMac. 8900-byte packets cut that to ~350 |
+| **1080p → 720p** | Roughly half the pixels to decode. The single biggest lever if the iMac is struggling |
+| **60 → 30 fps** | Halves both encode and decode work |
+| **Lower bitrate** | Less to parse, less to decode, fewer packets |
+
+The first one is worth understanding because it changes what silence means. A
+still screen used to be re-encoded as a forced keyframe once a second so that a
+client joining mid-session would still get a picture. But a client that joins
+sends HELLO, and a client that loses a packet asks for a keyframe, and both
+already trigger one on demand — so the periodic version was paying 4 Mb/s and a
+decode spike every second to re-send a picture nobody needed.
+
+The client now takes "the host is still there" from the control channel's
+once-a-second ping instead of from video traffic, which is why it can sit
+happily on a completely silent video socket.
+
+If the iMac is still struggling, look at `decode` in its statistics overlay
+(press `S`). Above about 15 ms per frame at 60 fps it cannot keep up, and the
+shallow decode queue will start dropping frames rather than accumulating
+latency — visible as `dropped` climbing in the same overlay.
+
+### Host and client versions have to match
+
+The change above is not backward compatible. An **older client paired with a
+newer host** will blank every few seconds on a still screen: it is still waiting
+for video traffic that no longer comes. If you update one, update both.
 
 ## 7. Testing without the iMac
 

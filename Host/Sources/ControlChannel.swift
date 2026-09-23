@@ -97,6 +97,7 @@ final class ControlChannel {
 
     private func receiveLoop(_ sock: UDPBoundSocket) {
         var buffer = [UInt8](repeating: 0, count: 2048)
+        var consecutiveErrors = 0
 
         while running {
             var from = sockaddr_in()
@@ -106,9 +107,37 @@ final class ControlChannel {
             }
             if n <= 0 {
                 if !running { break }
-                if errno == EINTR { continue }
-                break
+                let code = errno
+                if code == EINTR { continue }
+
+                // Anything else used to end the loop, which quietly killed the
+                // control channel for the rest of the session: no more pings,
+                // so the client would time out and blank with no indication
+                // why. No confirmed case of that happening -- the obvious
+                // candidate, an ICMP unreachable from a restarted client, does
+                // not surface here -- but a channel that can disappear for the
+                // rest of a session without a word is not worth keeping.
+                //
+                // Only a socket that is genuinely gone is fatal.
+                if code == EBADF || code == ENOTSOCK {
+                    NSLog("[LanScreen] control socket closed (%s)",
+                          String(cString: strerror(code)))
+                    break
+                }
+
+                consecutiveErrors += 1
+                if consecutiveErrors == 1 || consecutiveErrors % 50 == 0 {
+                    NSLog("[LanScreen] control receive error, continuing (%s, %d in a row)",
+                          String(cString: strerror(code)), consecutiveErrors)
+                }
+                if consecutiveErrors > 500 {
+                    NSLog("[LanScreen] control socket is not recovering, giving up")
+                    break
+                }
+                usleep(2000)
+                continue
             }
+            consecutiveErrors = 0
 
             var message = ls_ctrl_message()
             let ok = buffer.withUnsafeBufferPointer { p -> Bool in

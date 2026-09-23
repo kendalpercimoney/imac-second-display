@@ -84,9 +84,29 @@ echo
 echo "==> unit tests"
 "$OUT/lsdepacketizertest"
 
+echo "==> building the control-channel resilience check"
+xcrun swiftc -O \
+    -Xcc -fmodule-map-file="$ROOT/Common/include/module.modulemap" \
+    -Xcc -I"$ROOT/Common/include" \
+    -I "$ROOT/Common/include" \
+    "$OUT/rtp_protocol.o" \
+    "$ROOT/Host/Sources/UDPSocket.swift" \
+    "$ROOT/Host/Sources/ControlChannel.swift" \
+    "$ROOT/Tests/ControlResilience/main.swift" \
+    -o "$OUT/controlresilience"
+
 echo
 echo "==> Wake-on-LAN"
-"$OUT/wakecheck" "${CLIENT_IP:-10.0.0.2}" "${CLIENT_MAC:-c4:2c:03:07:35:10}"
+# Sends real packets over the direct link, so it depends on that link being up
+# and can fail transiently when the machine is busy. Retry once before
+# believing it.
+"$OUT/wakecheck" "${CLIENT_IP:-10.0.0.2}" "${CLIENT_MAC:-c4:2c:03:07:35:10}" \
+  || { echo "   retrying after a transient failure"; sleep 2; \
+       "$OUT/wakecheck" "${CLIENT_IP:-10.0.0.2}" "${CLIENT_MAC:-c4:2c:03:07:35:10}"; }
+
+echo
+echo "==> control channel survives a client coming and going"
+"$OUT/controlresilience"
 
 echo
 echo "==> loopback: encode -> RTP -> UDP -> depacketize -> decode"

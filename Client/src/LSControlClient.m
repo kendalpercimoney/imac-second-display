@@ -218,18 +218,41 @@
 
 - (void)receiveLoop {
     uint8_t buffer[LS_CTRL_MAX_SIZE * 4];
+    int consecutiveErrors = 0;
 
     while (_running) {
         @autoreleasepool {
             ssize_t n = recv(_fd, buffer, sizeof(buffer), 0);
             if (n <= 0) {
                 if (!_running) break;
-                if (errno == EINTR) continue;
-                // ECONNREFUSED here means the host's control port is closed --
-                // it has quit. Keep looping; the app notices via lastHostContact.
-                if (errno == ECONNREFUSED) { usleep(200000); continue; }
-                break;
+                int code = errno;
+                if (code == EINTR) continue;
+                // ECONNREFUSED means the host's control port is closed -- it has
+                // quit, or has not started yet. Keep looping; the app notices
+                // via lastHostContact, and the host may well come back.
+                if (code == ECONNREFUSED) { usleep(200000); continue; }
+                // Anything unexpected used to end the loop for good, which
+                // silently killed this socket for the rest of the session. A
+                // UDP socket can surface transient errors that say nothing
+                // about its health, so only a socket that is genuinely gone is
+                // fatal; everything else is logged and retried.
+                if (code == EBADF || code == ENOTSOCK) {
+                    NSLog(@"[LanScreen] control socket closed (%s)", strerror(code));
+                    break;
+                }
+                consecutiveErrors++;
+                if (consecutiveErrors == 1 || consecutiveErrors % 50 == 0) {
+                    NSLog(@"[LanScreen] control receive error, continuing (%s, %d in a row)",
+                          strerror(code), consecutiveErrors);
+                }
+                if (consecutiveErrors > 500) {
+                    NSLog(@"[LanScreen] control socket is not recovering, giving up");
+                    break;
+                }
+                usleep(2000);
+                continue;
             }
+            consecutiveErrors = 0;
 
             ls_ctrl_message message;
             if (ls_ctrl_parse(buffer, (size_t)n, &message) != 0) continue;

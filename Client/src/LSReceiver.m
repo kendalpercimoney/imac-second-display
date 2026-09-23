@@ -134,6 +134,7 @@
     const size_t capacity = LS_MAX_UDP_PAYLOAD;
     uint8_t *buffer = (uint8_t *)malloc(capacity);
     if (!buffer) return;
+    int consecutiveErrors = 0;
 
     while (_running) {
         // The autorelease pool is inside the loop on purpose: the depacketizer
@@ -143,10 +144,30 @@
             ssize_t n = recv(_fd, buffer, capacity, 0);
             if (n <= 0) {
                 if (!_running) break;
-                if (errno == EINTR) continue;
-                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-                break;
+                int code = errno;
+                if (code == EINTR || code == EAGAIN || code == EWOULDBLOCK) continue;
+                // Anything unexpected used to end the loop for good, which
+                // silently killed this socket for the rest of the session. A
+                // UDP socket can surface transient errors that say nothing
+                // about its health, so only a socket that is genuinely gone is
+                // fatal; everything else is logged and retried.
+                if (code == EBADF || code == ENOTSOCK) {
+                    NSLog(@"[LanScreen] video socket closed (%s)", strerror(code));
+                    break;
+                }
+                consecutiveErrors++;
+                if (consecutiveErrors == 1 || consecutiveErrors % 50 == 0) {
+                    NSLog(@"[LanScreen] video receive error, continuing (%s, %d in a row)",
+                          strerror(code), consecutiveErrors);
+                }
+                if (consecutiveErrors > 500) {
+                    NSLog(@"[LanScreen] video socket is not recovering, giving up");
+                    break;
+                }
+                usleep(2000);
+                continue;
             }
+            consecutiveErrors = 0;
 
             _bytesReceived += (uint64_t)n;
             _lastPacketTime = [NSDate timeIntervalSinceReferenceDate];

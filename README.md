@@ -148,12 +148,64 @@ window and the status item glyph straight to PNG and exits, without opening
 anything. The look was checked that way rather than by asking someone to click
 the status item and describe what they saw.
 
+### Jumbo frames that are not there any more
+
+A packet size is a setting in this app but a property of the cable, the adapter
+and both machines. A manually raised MTU does not survive a reboot. So a setting
+that was right yesterday can be wrong today with nothing to show for it, and the
+failure is silent by construction: an oversized datagram is not rejected, it is
+split into IP fragments and delivered. Losing any one fragment destroys the
+whole packet, so a link dropping a fraction of a percent of fragments drops
+several percent of packets — and the kernel's reassembly queues fill as it goes,
+which is why it degrades over minutes instead of failing outright.
+
+This was found by reading `netstat -s -p ip` on a machine where it was
+happening: 921,196 fragments created from 153,943 datagrams, almost exactly the
+six-way split an 8900 B payload takes on a 1500 B link, and zero while idle.
+
+The host now asks the interface that routes to the client what it can carry, and
+uses the smaller of that and the configured size. It says so in the panel and in
+the log rather than changing the saved setting, so restoring MTU 9000 on both
+ends brings jumbo frames back on its own.
+
+    log show --predicate 'subsystem == "com.lanscreen.host"' --last 15m
+
+is also where a line a second of throughput, latency, loss and keyframe counts
+now goes, because nothing kept a history and by the time you notice a
+degradation the numbers that would explain it are gone.
+
+### Measured and rejected: App Nap
+
+Moving the host into the menu bar changed one thing about how the OS sees the
+process — it no longer has a window, which is one of the conditions App Nap
+looks for, and App Nap does not apply immediately. That is a good enough story
+that it was worth eight minutes to find out it is wrong.
+
+`./Tests/run_nap_check.sh` runs three real signed .app bundles at once, each
+with a 120 Hz timer on a user-interactive queue and a fixed slice of arithmetic:
+an accessory with no window and no activity assertion, an accessory with the
+assertion (the app as it now ships), and a regular app with a visible window and
+the assertion (the app as it was). Over eight minutes all three held a 8.33 ms
+median with no drift, and the accessory build missed fewer deadlines than the
+windowed one, not more.
+
+The first version of that test calibrated its workload per process, so each of
+the three picked a different amount of arithmetic and their work times could not
+be compared with each other — which was the entire point of measuring them.
+
 ## Verifying it
 
 `./Tests/run_cursor_test.sh` sends a solid magenta pointer to a known position
 over a red part of the test pattern and checks that pixel in the client's own
 framebuffer. Nothing else in the pipeline can catch a mistake in the coordinate
 mapping or the hotspot: it would simply appear in the wrong place on the iMac.
+
+`./Tests/run_mtu_test.sh` checks that the host finds the MTU of the interface
+that actually routes to the client — not merely that it finds *an* MTU, which
+passes when the lookup returns the wrong interface — and that it cuts the
+payload to fit. Both halves were confirmed by breaking them: with the clamp
+disabled and with the interface lookup taking the first interface it sees, the
+test fails in each case.
 
 `./Tests/EncoderLatency` and `./Tests/QualityCheck` produced the numbers above,
 and `./Tests/run_loopback_test.sh` takes `PIPELINE=plain` to measure the
@@ -871,6 +923,7 @@ Host/                    Swift + SwiftUI, macOS 13+
     MenuBarPanel.swift       the panel behind the status item
     AeroStyle.swift          the Aero look: glass, gloss, bevels, meters
     UISnapshot.swift         --render-ui, draws every view to PNG and exits
+    UnattendedRun.swift      --autostart/--quit-after/--with-window, for measuring
     StreamController.swift   pipeline wiring, heartbeat, stats
     CaptureEngine.swift      ScreenCaptureKit
     VideoEncoder.swift       VideoToolbox H.264
@@ -901,4 +954,6 @@ Tests/
   IdleCost/main.swift    measures what an idle screen costs to stream
   run_loopback_test.sh   headless: unit tests + encode/decode round trip
   run_render_test.sh     the OpenGL path, checked numerically
+  PathMTU/main.swift     link MTU discovery and the payload clamp
+  NapCheck/main.swift    whether an app with no window gets throttled
 ```

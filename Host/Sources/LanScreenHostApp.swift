@@ -26,7 +26,9 @@ struct LanScreenHostApp: App {
     init() {
         let settings = StreamSettings()
         _settings = StateObject(wrappedValue: settings)
-        _controller = StateObject(wrappedValue: StreamController(settings: settings))
+        let controller = StreamController(settings: settings)
+        _controller = StateObject(wrappedValue: controller)
+        UnattendedRun.begin(settings: settings, controller: controller)
     }
 
     var body: some Scene {
@@ -54,7 +56,7 @@ struct LanScreenHostApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if UISnapshot.runIfRequested() { NSApp.terminate(nil); return }
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(UnattendedRun.wantsWindow ? .regular : .accessory)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -91,8 +93,9 @@ enum HostWindows {
             observer = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
                     // Back to an accessory once it is gone, or the Dock icon
-                    // outlives the only window that justified it.
-                    NSApp.setActivationPolicy(.accessory)
+                    // outlives the only window that justified it. Except under
+                    // --with-window, where staying a regular app is the point.
+                    if !UnattendedRun.wantsWindow { NSApp.setActivationPolicy(.accessory) }
                 }
         }
         NSApp.setActivationPolicy(.regular)
@@ -317,6 +320,8 @@ struct ContentView: View {
                 }
                 .disabled(controller.isRunning)
 
+                if controller.linkMTUBytes > 0 { linkMTUNote }
+
                 HStack {
                     Button("Force keyframe") { controller.requestKeyframeNow() }
                         .disabled(!controller.isRunning)
@@ -331,6 +336,20 @@ struct ContentView: View {
             }
             .padding(6)
         }
+    }
+
+    /// Split out of the Network section because the type checker gave up on it
+    /// inline.
+    private var linkMTUNote: some View {
+        let mtu = controller.linkMTUBytes
+        let fits = controller.effectiveMTUPayload == settings.mtuPayload
+        let text = "The link to \(settings.clientAddress) reports an MTU of \(mtu) B, so the "
+            + "largest packet that does not get split into IP fragments carries "
+            + "\(mtu - lsIPv4UDPOverhead) B."
+        return Text(text)
+            .font(.caption)
+            .foregroundStyle(fits ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var latencySection: some View {

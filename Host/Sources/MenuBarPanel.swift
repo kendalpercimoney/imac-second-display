@@ -209,6 +209,17 @@ struct MenuBarPanel: View {
                     readout("Dropped", "\(controller.client.stats.frames_dropped)",
                             alarm: controller.client.stats.frames_dropped > 0)
                 }
+                GridRow {
+                    readout("Link MTU", controller.linkMTUBytes > 0
+                            ? "\(controller.linkMTUBytes) B" : "—")
+                    // Red when it is not what was asked for: that means the
+                    // link could not carry the configured size.
+                    readout("Packet", controller.effectiveMTUPayload > 0
+                            ? "\(controller.effectiveMTUPayload) B" : "—",
+                            alarm: controller.effectiveMTUPayload > 0
+                                && controller.effectiveMTUPayload != settings.mtuPayload)
+                    readout("Keyframes", "\(controller.keyframeRequests)")
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 

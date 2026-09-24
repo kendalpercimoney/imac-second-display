@@ -115,6 +115,39 @@ is how the first version of this test passed against the broken code.
 | drawing on the control thread | 38,891 µs |
 | render thread, split locks, cached accessors | 366 µs |
 
+### It lives in the menu bar now, and it looks like 2006
+
+The host has no Dock icon and no window on launch. There is a small monitor in
+the menu bar, blue with a green lamp while it is streaming, grey while it is
+not, and amber while it is sending to a client that has not answered. Clicking
+it drops a panel with the start button, three live meters, the link numbers and
+the three switches that actually change how the stream feels. Everything you
+set once — ports, resolution, bitrate, Wake-on-LAN — is behind **Settings…**, in
+the old window.
+
+The style is Aero, on purpose and fairly literally. Three things make it work,
+and the first one is the one that is easy to get wrong:
+
+- **Shading is by lightness, not by alpha.** A tint at 80% opacity over pale
+  blue glass comes out *lighter*, so a gradient built from opacity steps shades
+  a surface the wrong way round and everything ends up looking flat and washed.
+  Every gradient here blends toward white or toward black instead.
+- **The gloss has a hard edge halfway down.** A soft fade reads as a modern
+  gradient. The abrupt break is what reads as glass.
+- **A 1px white bevel just inside a darker border**, which is what fakes a lit
+  edge.
+
+The app runs as an accessory, so it has no menu bar of its own — and therefore
+no Edit menu, and therefore no Paste. That matters, because the Power section
+asks you to paste in the output of `arp`. So it becomes a regular app for
+exactly as long as the settings window is open, and drops back to an accessory
+when you close it.
+
+`LanScreenHost --render-ui <dir>` draws the panel in both states, the settings
+window and the status item glyph straight to PNG and exits, without opening
+anything. The look was checked that way rather than by asking someone to click
+the status item and describe what they saw.
+
 ## Verifying it
 
 `./Tests/run_cursor_test.sh` sends a solid magenta pointer to a known position
@@ -834,7 +867,10 @@ Common/                  the wire format, compiled into both ends
   rtp_protocol.c
 Host/                    Swift + SwiftUI, macOS 13+
   Sources/
-    LanScreenHostApp.swift   UI
+    LanScreenHostApp.swift   menu bar scene, settings window, activation policy
+    MenuBarPanel.swift       the panel behind the status item
+    AeroStyle.swift          the Aero look: glass, gloss, bevels, meters
+    UISnapshot.swift         --render-ui, draws every view to PNG and exits
     StreamController.swift   pipeline wiring, heartbeat, stats
     CaptureEngine.swift      ScreenCaptureKit
     VideoEncoder.swift       VideoToolbox H.264

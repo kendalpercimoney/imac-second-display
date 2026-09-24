@@ -19,6 +19,7 @@ import LSProtocol
 
 @main
 struct LanScreenHostApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var settings = StreamSettings()
     @StateObject private var controller: StreamController
 
@@ -29,12 +30,74 @@ struct LanScreenHostApp: App {
     }
 
     var body: some Scene {
-        Window("LanScreen Host", id: "main") {
-            ContentView(settings: settings, controller: controller)
-                .frame(minWidth: 560, minHeight: 620)
+        // The menu bar is the app. There is no window scene at all, because a
+        // SwiftUI `Window` opens itself at launch and this is not a thing you
+        // want a window for — the settings window is built on demand instead.
+        MenuBarExtra {
+            MenuBarPanel(settings: settings, controller: controller)
                 .task { await controller.refreshDisplays() }
+        } label: {
+            Image(nsImage: Aero.menuBarIcon(
+                running: controller.isRunning,
+                attention: controller.lastError != nil
+                    || (controller.isRunning && !controller.client.hasSaidHello)))
+                .renderingMode(.original)
         }
-        .windowResizability(.contentMinSize)
+        .menuBarExtraStyle(.window)
+    }
+}
+
+/// Runs as an accessory: no Dock icon, no menu bar of its own, just the status
+/// item. It becomes a regular app for as long as the settings window is open,
+/// so that window gets a real Edit menu — without one there is no Paste, and
+/// the MAC address field exists specifically to have something pasted into it.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if UISnapshot.runIfRequested() { NSApp.terminate(nil); return }
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+}
+
+/// The settings window, built by hand rather than as a SwiftUI scene so that it
+/// exists only once it is asked for.
+enum HostWindows {
+    private static var settings: NSWindow?
+    private static var observer: NSObjectProtocol?
+
+    static func showSettings(settings streamSettings: StreamSettings,
+                             controller: StreamController) {
+        if settings == nil {
+            let view = ContentView(settings: streamSettings, controller: controller)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 600, height: 740),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered, defer: false)
+            window.title = "LanScreen Host"
+            window.contentView = NSHostingView(rootView: view)
+            window.contentMinSize = NSSize(width: 560, height: 480)
+            window.isReleasedWhenClosed = false
+            // Aero has no dark mode, so the window is pinned light and the
+            // titlebar is left to blend into the glass behind it.
+            window.appearance = NSAppearance(named: .aqua)
+            window.titlebarAppearsTransparent = true
+            window.backgroundColor = NSColor(srgbRed: 0.91, green: 0.96, blue: 1.0, alpha: 1)
+            window.center()
+            settings = window
+
+            observer = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
+                    // Back to an accessory once it is gone, or the Dock icon
+                    // outlives the only window that justified it.
+                    NSApp.setActivationPolicy(.accessory)
+                }
+        }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        settings?.makeKeyAndOrderFront(nil)
     }
 }
 
@@ -44,7 +107,7 @@ struct ContentView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 14) {
                 header
                 sourceSection
                 destinationSection
@@ -52,28 +115,64 @@ struct ContentView: View {
                 networkSection
                 latencySection
                 powerSection
-                Divider()
                 statsSection
                 if let error = controller.lastError { errorBox(error) }
                 if !controller.warnings.isEmpty { warningBox(controller.warnings) }
             }
-            .padding(20)
+            .padding(18)
         }
+        .background(Aero.GlassBackground())
+        // Set once here rather than at four hundred call sites: every GroupBox,
+        // Button and Toggle below picks these up through the environment, which
+        // is the only reason the window could be reskinned without rewriting it.
+        .groupBoxStyle(AeroGroupBoxStyle())
+        .buttonStyle(AeroButtonStyle())
+        .toggleStyle(AeroToggleStyle())
+        .tint(Aero.blue)
+        .foregroundStyle(Aero.ink)
+        .environment(\.colorScheme, .light)
+        .task { await controller.refreshDisplays() }
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(controller.isRunning ? Color.green : Color.secondary.opacity(0.4))
-                .frame(width: 10, height: 10)
-            Text(controller.statusText).font(.headline)
+        HStack(spacing: 11) {
+            Aero.Orb(colour: controller.isRunning ? Aero.green : Color(white: 0.55),
+                     diameter: 14, lit: controller.isRunning)
+                .padding(.leading, 3)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("LanScreen Greedy")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.45), radius: 1.5, y: 0.5)
+                Text(controller.statusText)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .shadow(color: .black.opacity(0.4), radius: 1, y: 0.5)
+            }
             Spacer()
             Button(controller.isRunning ? "Stop" : "Start") {
                 controller.isRunning ? controller.stop() : controller.start()
             }
             .keyboardShortcut(.return, modifiers: [.command])
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(AeroButtonStyle(kind: controller.isRunning ? .stop : .primary))
+            .frame(width: 96)
+            .padding(.trailing, 3)
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(
+            ZStack(alignment: .bottom) {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(LinearGradient(colors: [Aero.chromeTop, Aero.chromeBottom],
+                                         startPoint: .top, endPoint: .bottom))
+                Aero.Gloss(cornerRadius: 7, strength: 0.42)
+                Aero.Bevel(cornerRadius: 7,
+                           edge: .white.opacity(0.45),
+                           border: Aero.chromeBottom.blended(with: .black, amount: 0.3))
+            }
+            .compositingGroup()
+            .shadow(color: .black.opacity(0.22), radius: 3, y: 1)
+        )
     }
 
     private var destinationSection: some View {
@@ -360,7 +459,7 @@ struct ContentView: View {
                 HStack {
                     Text("Estimated glass-to-glass")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text(String(format: "≈ %.0f ms", latencyEstimate))
+                    Text(String(format: "≈ %.0f ms", controller.estimatedGlassToGlassMilliseconds))
                         .font(.system(.body, design: .monospaced).bold())
                     Text("capture→wire + RTT/2 + decode + render, plus one frame of capture")
                         .font(.caption2).foregroundStyle(.secondary)
@@ -368,15 +467,6 @@ struct ContentView: View {
                 .padding(.horizontal, 6).padding(.bottom, 4)
             }
         }
-    }
-
-    private var latencyEstimate: Double {
-        // Host side is measured directly. Network is half the round trip. The
-        // client reports its own decode and render times.
-        controller.hostPipelineMilliseconds
-            + controller.client.rttMilliseconds / 2.0
-            + Double(controller.client.stats.decode_us) / 1000.0
-            + Double(controller.client.stats.render_us) / 1000.0
     }
 
     private func stat(_ label: String, _ value: String) -> some View {

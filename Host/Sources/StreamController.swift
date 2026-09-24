@@ -599,3 +599,31 @@ final class StreamController: ObservableObject {
         onMain { self.sdpPath = url.path }
     }
 }
+
+// Lives here rather than beside the snapshot code because these setters are
+// private on purpose: nothing outside this file gets to invent stream state.
+extension StreamController {
+    /// Plausible mid-stream numbers, for `--render-ui` only. Nothing in the app
+    /// calls this.
+    func applyPreviewState() {
+        isRunning = true
+        statusText = "Streaming to 10.0.0.2:5004"
+        outgoingMbps = 23.4
+        encodedFPS = 59
+        hostPipelineMilliseconds = 9.4
+        keyframeRequests = 3
+        fullPerformanceHeld = true
+        activeSourceDescription = "Virtual display 1920×1080 @ 60"
+        var state = ControlChannel.ClientState()
+        state.address = "10.0.0.2"
+        state.hasSaidHello = true
+        state.drawsCursor = true
+        state.rttMilliseconds = 0.31
+        state.stats.decode_us = 4200
+        state.stats.render_us = 1900
+        state.stats.frames_decoded = 18422
+        state.stats.frames_dropped = 2
+        state.stats.packets_lost = 0
+        client = state
+    }
+}

@@ -18,6 +18,13 @@
     <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <!--
+      Lives in the menu bar, so no Dock icon. The delegate flips the activation
+      policy back to regular for as long as the settings window is open, which
+      is what gives that window a real Edit menu (and therefore Paste).
+    -->
+    <key>LSUIElement</key>
+    <true/>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

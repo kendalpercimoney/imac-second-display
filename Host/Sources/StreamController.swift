@@ -252,7 +252,7 @@ final class StreamController: ObservableObject {
                     self.startedAt = Date()
                     self.isRunning = true
                     self.statusText = "Streaming to \(self.settings.clientAddress):\(self.settings.videoPort)"
-                    StreamController.statsLog.info(
+                    StreamController.statsLog.notice(
                         "stream started \(self.settings.width, privacy: .public)x\(self.settings.height, privacy: .public) @ \(self.settings.frameRate, privacy: .public), \(self.settings.bitrateMbps, format: .fixed(precision: 0), privacy: .public) Mb/s")
                 }
             } catch {
@@ -274,7 +274,7 @@ final class StreamController: ObservableObject {
         Task {
             await teardown()
             onMain {
-                StreamController.statsLog.info(
+                StreamController.statsLog.notice(
                     "stream stopped after \(Int(Date().timeIntervalSince(self.startedAt ?? Date())), privacy: .public)s")
                 self.startedAt = nil
                 self.isRunning = false
@@ -329,7 +329,7 @@ final class StreamController: ObservableObject {
             self.warnings = pathWarnings
         }
         if let mtu = linkMTU {
-            StreamController.statsLog.info(
+            StreamController.statsLog.notice(
                 "link mtu=\(mtu, privacy: .public) requested payload=\(requestedPayload, privacy: .public) using=\(effectivePayload, privacy: .public)")
         }
 
@@ -640,10 +640,16 @@ final class StreamController: ObservableObject {
     ///
     ///     log show --predicate 'subsystem == "com.lanscreen.host"' --last 15m
     ///     log stream --predicate 'subsystem == "com.lanscreen.host"'
+    ///
+    /// At `notice`, not `info`. Info-level messages live in a memory ring
+    /// buffer and are evicted, so the first version of this had already lost
+    /// the opening ninety seconds of a stream — including the line saying what
+    /// packet size was chosen — by the time anyone came to read it. Which is
+    /// the one thing a record of what happened must not do.
     private func logStatsLine() {
         guard isRunning else { return }
         let uptime = Int(Date().timeIntervalSince(startedAt ?? Date()))
-        StreamController.statsLog.info("""
+        StreamController.statsLog.notice("""
             t=\(uptime, privacy: .public)s \
             mbps=\(self.outgoingMbps, format: .fixed(precision: 1), privacy: .public) \
             fps=\(self.encodedFPS, format: .fixed(precision: 0), privacy: .public) \

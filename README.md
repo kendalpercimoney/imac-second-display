@@ -174,6 +174,20 @@ is also where a line a second of throughput, latency, loss and keyframe counts
 now goes, because nothing kept a history and by the time you notice a
 degradation the numbers that would explain it are gone.
 
+Those lines are logged at `notice`, not `info`, which took a second attempt to
+get right. Info-level messages live in a memory ring buffer and are evicted, so
+the first version had already lost the opening ninety seconds of a stream — the
+part that says what packet size was chosen — before anyone came to read it, and
+the `log show` command written here returned nothing at all.
+
+**One thing still fragments, and it is fine.** The packet-size clamp applies to
+the video. Cursor bitmaps go over the control channel as a single datagram of up
+to 64x64 RGBA, which is three or four IP fragments on a 1500 B link. Unlike a
+video packet, losing one costs a single cursor update and it is re-sent within
+five seconds, so it is not worth a protocol change to fix. If `netstat -s -p ip`
+shows a handful of fragmented datagrams while streaming and the video shows no
+loss, this is what they are.
+
 ### Measured and rejected: App Nap
 
 Moving the host into the menu bar changed one thing about how the OS sees the

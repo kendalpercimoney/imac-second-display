@@ -307,6 +307,7 @@
         if (!_brightness.available) {
             NSLog(@"[LanScreen] brightness control unavailable: %@", _brightness.statusMessage);
         }
+        _control.canSetBrightness = _brightness.available;
         LSBrightness *brightness = _brightness;
         _control.brightnessChanged = ^(float value) {
             [brightness setBrightness:value];
@@ -341,7 +342,13 @@
                         hotspotX:hotspotX hotspotY:hotspotY];
         };
 
-        [self sendHello];
+        // One line saying exactly what this build can and cannot do. OS X 10.9 has
+    // no permission prompts for any of it, so if something is not working the
+    // reason is here rather than in a dialog that never appeared.
+    NSLog(@"[LanScreen] capabilities: audio %@, brightness %@, pointer yes",
+          _audioPlayer ? @"yes" : (_audioEnabled ? @"NO (see above)" : @"off"),
+          _brightness.available ? @"yes" : @"NO (no display exposes it)");
+    [self sendHello];
     }
 }
 

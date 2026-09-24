@@ -335,7 +335,21 @@ struct MenuBarPanel: View {
                     .frame(width: 36, alignment: .trailing)
             }
             .onChange(of: settings.clientBrightness) { _ in controller.sendClientSettingsNow() }
+            .disabled(brightnessUnavailable)
+            .opacity(brightnessUnavailable ? 0.5 : 1)
+
+            if brightnessUnavailable {
+                Text("This client's display does not expose brightness.")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Aero.red)
+            }
         }
+    }
+
+    /// Only once the client has actually said so. Before that the control stays
+    /// live rather than being greyed out on a guess.
+    private var brightnessUnavailable: Bool {
+        controller.client.hasSaidHello && !controller.client.setsBrightness
     }
 
     // MARK: - The three switches worth reaching for

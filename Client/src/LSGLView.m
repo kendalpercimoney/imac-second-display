@@ -166,14 +166,14 @@
                 uint64_t remaining = _minimumDrawInterval - sinceLast;
                 double remainingNanos = (double)remaining * (double)_timebase.numer
                                       / (double)_timebase.denom;
-                struct timespec deadline;
-                clock_gettime(CLOCK_REALTIME, &deadline);
-                deadline.tv_nsec += (long)remainingNanos;
-                deadline.tv_sec += deadline.tv_nsec / 1000000000L;
-                deadline.tv_nsec %= 1000000000L;
-                // A timed wait rather than a sleep: it releases the mutex, so
-                // producers never block on the render thread napping.
-                pthread_cond_timedwait(&_renderCond, &_renderMutex, &deadline);
+                struct timespec wait;
+                wait.tv_sec = (time_t)(remainingNanos / 1e9);
+                wait.tv_nsec = (long)(remainingNanos - (double)wait.tv_sec * 1e9);
+                // Relative rather than absolute: clock_gettime does not exist
+                // before 10.12, and this Mac's SDK compiles it happily while
+                // the iMac's does not. The _np call has been in macOS since
+                // 10.4 and needs no wall clock at all.
+                pthread_cond_timedwait_relative_np(&_renderCond, &_renderMutex, &wait);
             }
         }
 

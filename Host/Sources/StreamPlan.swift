@@ -91,7 +91,8 @@ struct StreamPlan: Equatable {
     ///   - clientPlaysAudio: nil until a client has said hello. Audio is only
     ///     sent to a client that says it can play it — otherwise it is 1.5 Mb/s
     ///     into a socket nothing is listening to.
-    init(settings: StreamSettings, linkMTU: Int? = nil, clientPlaysAudio: Bool? = nil) {
+    init(settings: StreamSettings, linkMTU: Int? = nil,
+         clientPlaysAudio: Bool? = nil, clientSetsBrightness: Bool? = nil) {
         width = settings.width
         height = settings.height
         frameRate = settings.frameRate
@@ -120,6 +121,10 @@ struct StreamPlan: Equatable {
         }
         if !sendsAudio {
             inert.append(Override(control: "Volume", reason: "audio is off"))
+        }
+        if clientSetsBrightness == false {
+            inert.append(Override(control: "Brightness",
+                                  reason: "no display on the client exposes it"))
         }
 
         // The pointer must not be in the video as well as being sent beside it,

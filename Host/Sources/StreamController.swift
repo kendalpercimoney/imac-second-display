@@ -312,7 +312,9 @@ final class StreamController: ObservableObject {
         let requestedPayload = settings.mtuPayload
         let linkMTU = sender.linkMTU
         let plan = StreamPlan(settings: settings, linkMTU: linkMTU,
-                              clientPlaysAudio: client.hasSaidHello ? client.playsAudio : nil)
+                              clientPlaysAudio: client.hasSaidHello ? client.playsAudio : nil,
+                              clientSetsBrightness: client.hasSaidHello
+                                  ? client.setsBrightness : nil)
         let effectivePayload = plan.mtuPayload
         var pathWarnings: [String] = []
         if let mtu = linkMTU, effectivePayload != requestedPayload {

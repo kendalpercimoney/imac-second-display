@@ -200,7 +200,10 @@
     // and one that sends audio to a client that cannot play it would be pouring
     // 1.5 Mb/s into a socket nobody is listening to.
     size_t n = ls_ctrl_build_hello(buffer, sizeof(buffer), width, height, videoPort,
-                                   LS_CLIENT_FLAG_DRAWS_CURSOR | LS_CLIENT_FLAG_PLAYS_AUDIO,
+                                   (uint16_t)(LS_CLIENT_FLAG_DRAWS_CURSOR
+                                              | LS_CLIENT_FLAG_PLAYS_AUDIO
+                                              | (_canSetBrightness
+                                                 ? LS_CLIENT_FLAG_SETS_BRIGHTNESS : 0)),
                                    _haveLocalMAC ? _localMAC : NULL);
     [self sendBytes:buffer length:n];
 }

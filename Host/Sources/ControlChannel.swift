@@ -37,6 +37,8 @@ final class ControlChannel {
         var drawsCursor = false
         /// Whether the client told us it can play the audio stream.
         var playsAudio = false
+        /// Whether the client's display took a brightness reading.
+        var setsBrightness = false
         var hasSaidHello = false
         var lastSeen: Date?
         var rttMilliseconds: Double = 0
@@ -179,6 +181,7 @@ final class ControlChannel {
             state.screenHeight = Int(message.screen_height)
             state.drawsCursor = (message.flags & UInt16(LS_CLIENT_FLAG_DRAWS_CURSOR)) != 0
             state.playsAudio = (message.flags & UInt16(LS_CLIENT_FLAG_PLAYS_AUDIO)) != 0
+            state.setsBrightness = (message.flags & UInt16(LS_CLIENT_FLAG_SETS_BRIGHTNESS)) != 0
             state.hasSaidHello = true
             if !reportedMAC.isEmpty { state.macAddress = reportedMAC }
             lock.unlock()

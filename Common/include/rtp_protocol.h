@@ -221,6 +221,10 @@ enum {
 /* It can play the audio stream. Without this the host does not send any, rather
  * than pouring 1.5 Mb/s into a socket nothing is listening to. */
 #define LS_CLIENT_FLAG_PLAYS_AUDIO  0x0002u
+/* Its display accepted a brightness reading. Without this the host greys the
+ * brightness control out and says why, rather than moving a slider that does
+ * nothing at the far end. */
+#define LS_CLIENT_FLAG_SETS_BRIGHTNESS 0x0004u
 
 /* Client-reported counters. All cumulative since the client started, except
  * the *_us fields which are rolling averages over the last reporting period. */

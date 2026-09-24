@@ -157,6 +157,45 @@ value has its own test, because a negative number travelling through an unsigned
 field is precisely the kind of thing that works for positive values and silently
 does not for negative ones; that one was confirmed by masking the sign bit off.
 
+### Checking 10.9 compatibility without walking to the iMac
+
+The client is built on the iMac against the 10.9 SDK, but it is written on a
+current Mac against a current SDK, where anything Apple has added in the last
+decade compiles perfectly happily. `clock_gettime` went in exactly that way:
+fine here, `use of undeclared identifier CLOCK_REALTIME` over there, and the
+only way to find out was to go and build it on the other machine.
+
+    ./Tests/run_client_compat_check.sh
+
+compiles every client source against the current SDK with a 10.9 deployment
+target and `-Werror=unguarded-availability`, which reports anything newer than
+the target. It reproduces that exact error, and it is the last line of the
+suite that matters before handing a build over.
+
+Note the flag has no `-new` suffix. `-Wunguarded-availability-new` sounds like
+the stricter one and is the opposite: it only warns about things newer than the
+SDK's own baseline, and it lets `clock_gettime` through silently. That was worth
+checking rather than assuming, because a compatibility check that passes
+everything is worse than none.
+
+The wait in the render loop now uses `pthread_cond_timedwait_relative_np`, which
+has been in macOS since 10.4 and needs no wall clock at all.
+
+### The client asks for no permissions, and says what it can do
+
+OS X 10.9 has no permission prompts for anything the client does: playing audio,
+reading and setting display brightness, and opening UDP sockets all just work or
+just do not. So there is nothing to grant, and nothing to have forgotten to
+grant. What there *was* is silent failure, which looks the same from the outside.
+
+It now prints one line at startup saying exactly what it managed:
+
+    [LanScreen] capabilities: audio yes, brightness NO (no display exposes it), pointer yes
+
+and it tells the host the same thing in its HELLO. The host greys the brightness
+slider out and says why, rather than moving a control that does nothing at the
+far end — the same treatment the pointer and audio controls already get.
+
 ### Why the iMac was getting hot
 
 Two things, both measured on the client under a fixed video load by reading the

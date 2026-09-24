@@ -52,6 +52,10 @@
 /// Panel brightness the host wants, 0 to 1.
 @property (nonatomic, copy) void (^brightnessChanged)(float brightness);
 
+/// Whether this machine's display actually took a brightness reading. Told to
+/// the host in the HELLO so it can grey the control out rather than pretending.
+@property (nonatomic, assign) BOOL canSetBrightness;
+
 @property (nonatomic, copy) void (^hostSaidGoodbye)(void);
 
 /// The pointer, sent separately from the video so it is not a whole

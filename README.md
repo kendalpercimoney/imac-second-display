@@ -629,6 +629,12 @@ log stream --predicate 'subsystem == "com.lanscreen.host"'
 The same place records the MTU of the link and what packet size was actually
 used.
 
+These are logged at `notice`, not `info`, which took a second attempt to get
+right: info-level messages live in a memory ring buffer and are evicted, so the
+opening minute or two of a stream — including the line saying what packet size
+the link allowed — ages out while the stream is still running, and the command
+above returns nothing.
+
 ## 8. Troubleshooting
 
 **About a second of delay when testing with VLC** — That is VLC's own

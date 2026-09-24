@@ -394,6 +394,13 @@
     fprintf(stdout, "snapshot %s after %u frames: %s\n",
             ok ? "written" : "FAILED", [_decoder framesDecoded],
             [_snapshotPath UTF8String]);
+    fprintf(stdout, "cursor positions processed: %u\n",
+            [_control cursorMessagesReceived]);
+    fprintf(stdout, "slowest pointer update: %u us\n",
+            [_glView cursorUpdateMaxMicroseconds]);
+    fprintf(stdout, "render time: %.2f ms (vsync %s)\n",
+            [_glView renderMicroseconds] / 1000.0,
+            _glView.vsyncEnabled ? "on" : "off");
     fflush(stdout);
     [NSApp terminate:nil];
 }
@@ -424,6 +431,7 @@
             [_decoder decodeMicroseconds] / 1000.0,
             [_glView renderMicroseconds] / 1000.0,
             _glView.vsyncEnabled ? @"on" : @"off"];
+        [text appendFormat:@"pointer updates %u\n", [_control cursorMessagesReceived]];
         [text appendFormat:@"recv buffer %d KB%@\n",
             [_receiver receiveBufferBytes] / 1024,
             [_receiver receiveBufferBytes] < 1024 * 1024 ? @"   TOO SMALL" : @""];

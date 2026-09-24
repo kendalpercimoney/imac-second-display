@@ -31,6 +31,12 @@ let port = UInt16(CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "
 let cursorX = UInt16(CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "400") ?? 400
 let cursorY = UInt16(CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "300") ?? 300
 let seconds = Double(CommandLine.arguments.count > 4 ? CommandLine.arguments[4] : "6") ?? 6
+// Positions per second. Deliberately higher than any display's refresh rate:
+// the fault this guards against only appears when updates arrive faster than
+// a vsynced draw can complete, so a rate at or below the refresh rate hides it.
+// This machine is 120 Hz, the iMac is 60, and the default send rate is 120 --
+// which is why the first version of this test passed against the broken code.
+let rateHz = Double(CommandLine.arguments.count > 5 ? CommandLine.arguments[5] : "360") ?? 360
 
 let size = 16
 let hotspot = 8
@@ -68,42 +74,54 @@ var imageBuffer = [UInt8](repeating: 0, count: Int(LS_CTRL_MAX_PACKET))
 var positionBuffer = [UInt8](repeating: 0, count: Int(LS_CTRL_MAX_SIZE))
 var have = false
 let deadline = Date().addingTimeInterval(seconds)
+// Sweep fast for most of the run, then settle on the final position and hold
+// it. Whatever is on screen at the end must be the settled position: if the
+// client renders on the thread that receives these, it can only draw half of
+// them, the rest queue, and it ends up drawing a position from seconds ago.
+let settleAt = deadline.addingTimeInterval(-2.0)
 var recvBuffer = [UInt8](repeating: 0, count: 2048)
+var sent = 0
+
+func send(_ buffer: [UInt8], _ count: Int, to client: sockaddr_in) {
+    var target = client
+    _ = withUnsafePointer(to: &target) { p in
+        p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+            sendto(fd, buffer, count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+}
 
 while Date() < deadline {
     var from = sockaddr_in()
     var length = socklen_t(MemoryLayout<sockaddr_in>.size)
     let n = withUnsafeMutablePointer(to: &from) { p -> Int in
         p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-            recvBuffer.withUnsafeMutableBytes { recvfrom(fd, $0.baseAddress, $0.count, 0, sa, &length) }
+            recvBuffer.withUnsafeMutableBytes {
+                recvfrom(fd, $0.baseAddress, $0.count, MSG_DONTWAIT, sa, &length)
+            }
         }
     }
     if n > 0 && !have { client = from; have = true; print("cursorsend: client found") }
-    guard have else { continue }
+    guard have else { usleep(20_000); continue }
 
-    // The bitmap first, then position updates. Both are re-sent: there is no
-    // acknowledgement, and the bitmap is large enough that IP may fragment it.
     let imageBytes = rgba.withUnsafeBufferPointer { p in
         ls_ctrl_build_cursor_image(&imageBuffer, imageBuffer.count, 1,
                                    UInt16(size), UInt16(size),
                                    UInt16(hotspot), UInt16(hotspot),
                                    p.baseAddress, UInt32(rgba.count))
     }
-    var target = client
-    _ = withUnsafePointer(to: &target) { p in
-        p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-            sendto(fd, imageBuffer, Int(imageBytes), 0, sa,
-                   socklen_t(MemoryLayout<sockaddr_in>.size))
-        }
+    if sent % 30 == 0 { send(imageBuffer, Int(imageBytes), to: client) }
+
+    // Sweeping x back and forth, then parked on the target.
+    var x = cursorX
+    var y = cursorY
+    if Date() < settleAt {
+        x = UInt16(120 + (sent * 7) % 900)
+        y = UInt16(120 + (sent * 3) % 400)
     }
-    let positionBytes = ls_ctrl_build_cursor(&positionBuffer, positionBuffer.count,
-                                             cursorX, cursorY, 1, 1)
-    _ = withUnsafePointer(to: &target) { p in
-        p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-            sendto(fd, positionBuffer, Int(positionBytes), 0, sa,
-                   socklen_t(MemoryLayout<sockaddr_in>.size))
-        }
-    }
-    usleep(100_000)
+    let positionBytes = ls_ctrl_build_cursor(&positionBuffer, positionBuffer.count, x, y, 1, 1)
+    send(positionBuffer, Int(positionBytes), to: client)
+    sent += 1
+    usleep(UInt32(1_000_000.0 / rateHz))
 }
-print("cursorsend: done")
+print("cursorsend: sent \(sent) positions, settled on \(cursorX),\(cursorY)")

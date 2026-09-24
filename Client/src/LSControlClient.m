@@ -276,6 +276,7 @@
                     break;
                 }
                 case LS_MSG_CURSOR:
+                    _cursorMessagesReceived++;
                     if (self.cursorMoved) {
                         self.cursorMoved(message.cursor_x, message.cursor_y,
                                          message.cursor_visible != 0,

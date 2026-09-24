@@ -54,6 +54,15 @@
 
 @property (nonatomic, readonly) uint32_t renderMicroseconds;   // rolling average
 
+/// The longest a single pointer update has taken to hand over.
+///
+/// This is the invariant that matters for how the pointer feels: a thread
+/// receiving network data must never wait on the display. If this creeps up to
+/// milliseconds, something in the update path is blocking on a draw -- which on
+/// a 60 Hz screen means only half the updates can be serviced and the rest
+/// queue, one refresh apart, for as long as the pointer keeps moving.
+@property (nonatomic, readonly) uint32_t cursorUpdateMaxMicroseconds;
+
 /// Reads the framebuffer back and writes a PNG. Used by the test harness to
 /// prove the render path works without anyone having to look at a screen.
 /// Call from the main thread; returns NO if nothing has been drawn yet.

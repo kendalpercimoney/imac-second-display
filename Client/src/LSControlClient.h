@@ -59,4 +59,12 @@
 /// wake this machine later.
 @property (nonatomic, readonly) NSString *localMACString;
 
+/// How many pointer updates have been taken off the socket.
+///
+/// The host sends these at a fixed rate, so this falling short of that rate is
+/// the signature of the control thread being blocked on something it should not
+/// be doing -- drawing, for instance, which under vsync waits for the next
+/// vertical blank and so can only ever service half of them.
+@property (nonatomic, readonly) uint32_t cursorMessagesReceived;
+
 @end

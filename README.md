@@ -83,6 +83,38 @@ Constrained Baseline, a subset of the Baseline the iMac already decodes.
 - **Converting the panel to a monitor.** Out of scope for software, and it stops
   the iMac being a computer.
 
+### Nothing that receives data may draw
+
+The pointer arrives on the control thread. Drawing it there seems natural and is
+wrong: with vsync on, a draw waits for the next vertical blank, so on a 60 Hz
+screen the thread can service at most sixty updates a second while a hundred and
+twenty arrive. The rest queue in the socket buffer and are drawn later, stale,
+one refresh apart — latency that grows for as long as the pointer keeps moving.
+It reads as the pointer wading through syrup, and only with vsync on.
+
+So the client has a render thread. Producers — the decoder, the pointer, a
+resize — update state and signal it; it draws the newest state once per wake,
+coalescing whatever arrived in between. Two locks, not one: the GL lock is held
+for a whole draw, while the state lock is held only long enough to hand a frame
+or a position over.
+
+Both parts were necessary. Moving the draw to its own thread but leaving the one
+shared lock still made updates queue behind the current draw, and the client
+still only got through a third of them. The AppKit accessors mattered too:
+`-window` and `-bounds` are not safe from a background thread and can wait on
+AppKit's own lock, which was worth milliseconds on its own. They are cached by
+the main thread now.
+
+`run_cursor_test.sh` asserts the invariant directly — handing over a pointer
+update must not wait on a draw — because inferring it from throughput only works
+when the display is slower than the send rate. It is not on every machine, which
+is how the first version of this test passed against the broken code.
+
+| | slowest pointer update |
+|---|---|
+| drawing on the control thread | 38,891 µs |
+| render thread, split locks, cached accessors | 366 µs |
+
 ## Verifying it
 
 `./Tests/run_cursor_test.sh` sends a solid magenta pointer to a known position

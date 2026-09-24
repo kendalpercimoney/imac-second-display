@@ -58,7 +58,7 @@ enum UISnapshot {
               to: directory.appendingPathComponent("menubar-icon.png"),
               width: 200)
 
-        write(ContentView(settings: settings, controller: controller)
+        write(SettingsView(settings: settings, controller: controller)
                 .frame(width: 600, height: 1180),
               to: directory.appendingPathComponent("window.png"),
               width: 600)

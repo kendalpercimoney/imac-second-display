@@ -312,12 +312,10 @@ final class StreamController: ObservableObject {
         var pathWarnings: [String] = []
         if let mtu = linkMTU, effectivePayload != requestedPayload {
             pathWarnings.append(
-                "Packet size set to \(requestedPayload) B but the link to "
-                + "\(settings.clientAddress) has an MTU of \(mtu). Every packet would be "
-                + "split into \(Int(ceil(Double(requestedPayload + lsIPv4UDPOverhead) / Double(mtu)))) "
-                + "IP fragments and one lost fragment destroys the whole packet, so "
-                + "\(effectivePayload) B is being used instead. To get jumbo frames back, set "
-                + "MTU 9000 on this Mac and the client — it is not persistent across a reboot.")
+                "Packet size \(requestedPayload) B needs an MTU of "
+                + "\(requestedPayload + lsIPv4UDPOverhead); the link to \(settings.clientAddress) "
+                + "is \(mtu). Using \(effectivePayload) B. For jumbo frames set MTU 9000 on "
+                + "both ends — it does not survive a reboot.")
         }
         onMain {
             self.plan = plan

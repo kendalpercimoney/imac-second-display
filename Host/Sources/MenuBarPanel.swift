@@ -225,8 +225,8 @@ struct MenuBarPanel: View {
 
             if settings.forwardCursor && controller.client.hasSaidHello
                 && !controller.client.drawsCursor {
-                Text("This client is too old to draw the pointer — rebuild it, or "
-                     + "turn the pointer switch off or there will be no pointer at all.")
+                Text("This client cannot draw the pointer. Rebuild it, or turn the "
+                     + "pointer switch off.")
                     .font(.system(size: 9.5))
                     .foregroundStyle(Aero.red)
                     .fixedSize(horizontal: false, vertical: true)
@@ -274,7 +274,7 @@ struct MenuBarPanel: View {
                     .padding(.leading, 2)
                 }
                 if controller.isRunning {
-                    Text("The two greyed switches are read when the stream starts.")
+                    Text("Greyed switches are read when the stream starts.")
                         .font(.system(size: 9))
                         .foregroundStyle(Aero.inkFaint.opacity(0.8))
                 }

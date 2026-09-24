@@ -104,8 +104,7 @@ struct StreamPlan: Equatable {
             capturesCursor = false
             let note = Override(
                 control: "Include mouse cursor",
-                reason: "the pointer is being sent separately, so it must not "
-                      + "also be burned into the video")
+                reason: "the pointer is sent separately")
             inert.append(note)
             if settings.showsCursor { overrides.append(note) }
         } else {
@@ -119,8 +118,7 @@ struct StreamPlan: Equatable {
             profile = .constrainedBaseline
             let note = Override(
                 control: "Profile",
-                reason: "the low-latency rate controller only offers Constrained "
-                      + "Baseline, which is a subset of the Baseline the iMac decodes")
+                reason: "low latency forces Constrained Baseline")
             inert.append(note)
             if settings.profile == .main { overrides.append(note) }
         } else {
@@ -135,8 +133,7 @@ struct StreamPlan: Equatable {
         if mtuPayload != settings.mtuPayload, let mtu = linkMTU {
             let note = Override(
                 control: "Packet size",
-                reason: "the link to \(settings.clientAddress) has an MTU of \(mtu), so "
-                      + "\(settings.mtuPayload) B would be split into IP fragments")
+                reason: "the link MTU is \(mtu)")
             inert.append(note)
             overrides.append(note)
         }

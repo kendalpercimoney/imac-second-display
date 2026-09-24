@@ -193,6 +193,49 @@ The first version of that test calibrated its workload per process, so each of
 the three picked a different amount of arithmetic and their work times could not
 be compared with each other — which was the entire point of measuring them.
 
+### Controls that did nothing
+
+Three of them, found by asking the question directly rather than by reading the
+code and believing it.
+
+**HiDPI is gone.** The toggle asked `CGVirtualDisplaySettings` for a Retina
+backing store. What came back, measured by reading the mode the window server
+actually settled on, was an ordinary 1:1 display:
+
+    virtual display 20 settled: 1920x1080 points / 1920x1080 pixels (hiDPI=1)
+
+Identical to the same thing with the toggle off. Three descriptor variants were
+tried — doubling `maxPixelsWide`/`maxPixelsHigh`, giving the mode in pixels
+rather than points, and both together — and every one produced the same 1:1
+mode. It never made a HiDPI display, it did make the picture come apart, and it
+would have been of no use on a 1080p 2010 panel if it had worked. A switch that
+does nothing except break things is worse than no switch.
+
+The geometry the window server settles on is now read back and logged, and it
+has to be read *after* the display is published: `CGDisplayCopyDisplayMode`
+returns nothing for one created a moment ago, which reads as 0x0 and looks like
+a failure rather than a race.
+
+**The Profile picker did nothing** whenever the low-latency encoder was on,
+which is the default. VideoToolbox's low-latency rate controller only offers
+Constrained Baseline, so asking for Main did not fail — it was simply not what
+you got.
+
+**Include mouse cursor did nothing** whenever the pointer was being sent
+separately, which is also the default, because the pointer must not be in the
+video as well as beside it.
+
+Both are still overridden, because both overrides are correct. What changed is
+that the overriding now happens in one place, `StreamPlan`, which records what
+it ignored and why — and the window greys those controls out and says so,
+instead of presenting a live-looking control and quietly discarding it.
+
+`./Tests/run_settings_audit.sh` flips every control in turn and requires that it
+either changes the plan the pipeline is built from, or is named as inert. A
+control may be ignored; it may not be ignored quietly. Both halves were
+confirmed by breaking them: with a setting wired to a constant, and with an
+override applied but not declared, the audit fails in each case.
+
 ## Verifying it
 
 `./Tests/run_cursor_test.sh` sends a solid magenta pointer to a known position
@@ -924,6 +967,7 @@ Host/                    Swift + SwiftUI, macOS 13+
     AeroStyle.swift          the Aero look: glass, gloss, bevels, meters
     UISnapshot.swift         --render-ui, draws every view to PNG and exits
     UnattendedRun.swift      --autostart/--quit-after/--with-window, for measuring
+    StreamPlan.swift         settings -> pipeline, in one place, with what it ignored
     StreamController.swift   pipeline wiring, heartbeat, stats
     CaptureEngine.swift      ScreenCaptureKit
     VideoEncoder.swift       VideoToolbox H.264
@@ -955,5 +999,6 @@ Tests/
   run_loopback_test.sh   headless: unit tests + encode/decode round trip
   run_render_test.sh     the OpenGL path, checked numerically
   PathMTU/main.swift     link MTU discovery and the payload clamp
+  SettingsAudit/main.swift  every control either does something or says it does not
   NapCheck/main.swift    whether an app with no window gets throttled
 ```

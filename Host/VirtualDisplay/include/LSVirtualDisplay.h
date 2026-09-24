@@ -45,7 +45,6 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable instancetype)initWithWidth:(NSUInteger)width
                                 height:(NSUInteger)height
                            refreshRate:(double)refreshRate
-                                 hiDPI:(BOOL)hiDPI
                                   name:(NSString *)name
                                  error:(NSError **)error;
 
@@ -53,6 +52,16 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) uint32_t displayID;
 @property (nonatomic, readonly) NSUInteger width;
 @property (nonatomic, readonly) NSUInteger height;
+/// What the window server actually settled on. A HiDPI display is addressed in
+/// points and stored in pixels, two to one; these are zero until it is created.
+@property (nonatomic, readonly) NSUInteger modePointsWide;
+@property (nonatomic, readonly) NSUInteger modePointsHigh;
+@property (nonatomic, readonly) NSUInteger modePixelsWide;
+@property (nonatomic, readonly) NSUInteger modePixelsHigh;
+
+/// Reads back the mode the window server settled on. Call it once the display
+/// has been published, not straight after creating it.
+- (void)refreshModeGeometry;
 
 @end
 

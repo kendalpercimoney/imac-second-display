@@ -49,6 +49,9 @@ final class StreamController: ObservableObject {
     /// sending. Both 0 until a stream has started.
     @Published private(set) var linkMTUBytes: Int = 0
     @Published private(set) var effectiveMTUPayload: Int = 0
+    /// What the running stream was actually configured with, including any
+    /// control whose value was not honoured. Nil until a stream has started.
+    @Published private(set) var plan: StreamPlan?
     @Published private(set) var activeSourceDescription: String = ""
     @Published private(set) var wakeStatus: String = ""
     @Published private(set) var fullPerformanceHeld = false
@@ -303,12 +306,10 @@ final class StreamController: ObservableObject {
         // nothing to show for it except a stream that slowly falls apart. Check
         // rather than assume, and carry on with what the link can actually take.
         let requestedPayload = settings.mtuPayload
-        var effectivePayload = requestedPayload
-        var pathWarnings: [String] = []
         let linkMTU = sender.linkMTU
-        effectivePayload = lsEffectiveMTUPayload(requested: requestedPayload,
-                                                 linkMTU: linkMTU,
-                                                 headerSize: Int(LS_RTP_HEADER_SIZE))
+        let plan = StreamPlan(settings: settings, linkMTU: linkMTU)
+        let effectivePayload = plan.mtuPayload
+        var pathWarnings: [String] = []
         if let mtu = linkMTU, effectivePayload != requestedPayload {
             pathWarnings.append(
                 "Packet size set to \(requestedPayload) B but the link to "
@@ -319,6 +320,7 @@ final class StreamController: ObservableObject {
                 + "MTU 9000 on this Mac and the client — it is not persistent across a reboot.")
         }
         onMain {
+            self.plan = plan
             self.linkMTUBytes = linkMTU ?? 0
             self.effectiveMTUPayload = effectivePayload
             // Published here rather than with the encoder's warnings at the end
@@ -363,13 +365,13 @@ final class StreamController: ObservableObject {
         try control.start(port: UInt16(settings.controlPort))
 
         let encoderConfig = VideoEncoder.Configuration(
-            width: settings.width,
-            height: settings.height,
-            frameRate: settings.frameRate,
-            bitrate: settings.bitrateBitsPerSecond,
-            profileIsBaseline: settings.profile == .baseline,
-            keyframeInterval: settings.keyframeSeconds,
-            lowLatencyRateControl: settings.lowLatencyEncoder)
+            width: plan.width,
+            height: plan.height,
+            frameRate: plan.frameRate,
+            bitrate: plan.bitrateBitsPerSecond,
+            profileIsBaseline: plan.profile != .main,
+            keyframeInterval: plan.keyframeSeconds,
+            lowLatencyRateControl: plan.lowLatencyRateControl)
 
         let encoder = VideoEncoder(config: encoderConfig) { [weak self] sampleBuffer in
             // VideoToolbox serializes output callbacks per session, so the
@@ -415,11 +417,11 @@ final class StreamController: ObservableObject {
         }
 
         try await capture.start(displayID: captureDisplayID,
-                                width: settings.width,
-                                height: settings.height,
-                                frameRate: settings.frameRate,
-                                showsCursor: settings.showsCursor && !settings.forwardCursor,
-                                useYUV420: settings.captureYUV420)
+                                width: plan.width,
+                                height: plan.height,
+                                frameRate: plan.frameRate,
+                                showsCursor: plan.capturesCursor,
+                                useYUV420: plan.capturesYUV420)
 
         // The pointer is drawn by the client, so it must not also be in the
         // video -- otherwise there are two of them, one lagging the other.
@@ -470,7 +472,6 @@ final class StreamController: ObservableObject {
         let display = try LSVirtualDisplay(width: UInt(settings.width),
                                            height: UInt(settings.height),
                                            refreshRate: Double(settings.frameRate),
-                                           hiDPI: settings.hiDPI,
                                            name: "LanScreen")
         virtualDisplay = display
         activeSourceDescription =
@@ -479,6 +480,11 @@ final class StreamController: ObservableObject {
         // The window server needs a moment to publish the new display before
         // SCShareableContent will list it.
         try? await Task.sleep(nanoseconds: 500_000_000)
+        display.refreshModeGeometry()
+        activeSourceDescription =
+            "Virtual display \(display.displayID) — \(display.modePointsWide)×\(display.modePointsHigh)"
+            + (display.modePixelsWide != display.modePointsWide
+               ? " (\(display.modePixelsWide)×\(display.modePixelsHigh) pixels)" : "")
         return display.displayID
     }
 

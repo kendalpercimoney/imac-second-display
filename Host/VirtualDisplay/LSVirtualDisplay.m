@@ -72,7 +72,6 @@ static Class LSDisplayClass(void)    { return NSClassFromString(@"CGVirtualDispl
 - (nullable instancetype)initWithWidth:(NSUInteger)width
                                 height:(NSUInteger)height
                            refreshRate:(double)refreshRate
-                                 hiDPI:(BOOL)hiDPI
                                   name:(NSString *)name
                                  error:(NSError **)error
 {
@@ -115,7 +114,10 @@ static Class LSDisplayClass(void)    { return NSClassFromString(@"CGVirtualDispl
     }
 
     LSCGVirtualDisplaySettings *settings = [[LSSettingsClass() alloc] init];
-    settings.hiDPI = hiDPI ? 1 : 0;
+    // No HiDPI. Setting it produced an ordinary 1:1 mode whatever was done with
+    // the descriptor and the mode dimensions -- measured, three ways -- while
+    // making the picture come apart. See the README.
+    settings.hiDPI = 0;
     id mode = [[LSModeClass() alloc] initWithWidth:(unsigned int)width
                                             height:(unsigned int)height
                                        refreshRate:refreshRate];
@@ -147,6 +149,31 @@ static Class LSDisplayClass(void)    { return NSClassFromString(@"CGVirtualDispl
     NSLog(@"[LanScreen] virtual display %u created at %lux%lu @%.0fHz",
           _displayID, (unsigned long)width, (unsigned long)height, refreshRate);
     return self;
+}
+
+// What we asked for is not necessarily what we got. A HiDPI display is
+// addressed in points and stored in pixels, two to one, and if the mode the
+// window server settles on disagrees with the size the capture and the encoder
+// are configured for, the picture comes apart.
+//
+// This has to be called after the window server has published the display, not
+// from the initialiser: CGDisplayCopyDisplayMode returns nothing at all for a
+// display that was created a moment ago, which reads as 0x0 and looks like a
+// failure rather than a race.
+- (void)refreshModeGeometry {
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(_displayID);
+    if (!mode) return;
+    _modePointsWide = CGDisplayModeGetWidth(mode);
+    _modePointsHigh = CGDisplayModeGetHeight(mode);
+    _modePixelsWide = CGDisplayModeGetPixelWidth(mode);
+    _modePixelsHigh = CGDisplayModeGetPixelHeight(mode);
+    CGDisplayModeRelease(mode);
+    NSLog(@"[LanScreen] virtual display %u settled: %lux%lu points / %lux%lu pixels "
+          @"(asked %lux%lu)",
+          _displayID,
+          (unsigned long)_modePointsWide, (unsigned long)_modePointsHigh,
+          (unsigned long)_modePixelsWide, (unsigned long)_modePixelsHigh,
+          (unsigned long)_width, (unsigned long)_height);
 }
 
 - (void)dealloc {

@@ -52,9 +52,6 @@ final class StreamSettings: ObservableObject {
     @Published var showsCursor: Bool    { didSet { save(showsCursor, "showsCursor") } }
     @Published var displayID: UInt32    { didSet { save(Int(displayID), "displayID") } }
     @Published var source: Source       { didSet { save(source.rawValue, "source") } }
-    /// Retina backing store for the virtual display. Leave off: it doubles the
-    /// pixels the encoder has to chew through for no benefit on a 2010 panel.
-    @Published var hiDPI: Bool          { didSet { save(hiDPI, "hiDPI") } }
     /// Seconds between unforced IDRs.
     ///
     /// A keyframe is several times the size of an inter frame and far more
@@ -125,7 +122,6 @@ final class StreamSettings: ObservableObject {
         showsCursor     = d.object(forKey: "ls.showsCursor") as? Bool ?? true
         displayID       = UInt32(int("displayID", 0))
         source          = Source(rawValue: d.string(forKey: "ls.source") ?? "") ?? .virtualDisplay
-        hiDPI           = d.object(forKey: "ls.hiDPI") as? Bool ?? false
         keyframeSeconds = dbl("keyframeSeconds", 5.0)
         wakeClientAutomatically = d.object(forKey: "ls.wakeClientAutomatically") as? Bool ?? true
         clientMACAddress = d.string(forKey: "ls.clientMACAddress") ?? ""

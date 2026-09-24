@@ -108,6 +108,25 @@ struct ContentView: View {
     @ObservedObject var settings: StreamSettings
     @ObservedObject var controller: StreamController
 
+    /// What the pipeline would be configured with right now. Used to grey out
+    /// controls that would have no effect, rather than presenting them as live
+    /// and quietly ignoring them.
+    private var plan: StreamPlan {
+        StreamPlan(settings: settings,
+                   linkMTU: controller.linkMTUBytes > 0 ? controller.linkMTUBytes : nil)
+    }
+
+    /// The note under a control that is not currently being honoured.
+    @ViewBuilder
+    private func inertNote(_ control: String) -> some View {
+        if let note = plan.inertFor(control) {
+            Label("Not in effect: \(note.reason).", systemImage: "info.circle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -216,11 +235,6 @@ struct ContentView: View {
                           systemImage: "display.2")
                         .font(.caption).foregroundStyle(.secondary)
 
-                    Toggle("HiDPI backing store", isOn: $settings.hiDPI)
-                        .disabled(controller.isRunning)
-                        .help("Leave off. It doubles the pixels the encoder has to "
-                              + "process for no benefit on a 2010 panel.")
-
                     if !controller.virtualDisplaySupported {
                         Label("This macOS does not expose CGVirtualDisplay. Use a hardware "
                               + "HDMI dummy plug and capture it as an existing display.",
@@ -286,6 +300,7 @@ struct ContentView: View {
                         ForEach(StreamSettings.Profile.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .labelsHidden().pickerStyle(.segmented).frame(width: 170)
+                    .disabled(plan.inertFor("Profile") != nil)
                     Text("Keyframe")
                     HStack(spacing: 4) {
                         TextField("", value: $settings.keyframeSeconds, format: .number)
@@ -297,11 +312,18 @@ struct ContentView: View {
                 GridRow {
                     Text("")
                     Toggle("Include mouse cursor", isOn: $settings.showsCursor)
+                        .disabled(plan.inertFor("Include mouse cursor") != nil)
                         .gridCellColumns(5)
                 }
             }
             .padding(6)
             .disabled(controller.isRunning)
+
+            VStack(alignment: .leading, spacing: 4) {
+                inertNote("Profile")
+                inertNote("Include mouse cursor")
+            }
+            .padding(.horizontal, 6)
 
             if settings.height > 1080 {
                 Label("Above 1080p the 2010 iMac will likely fall back to software decoding and stutter.",
@@ -321,6 +343,7 @@ struct ContentView: View {
                 .disabled(controller.isRunning)
 
                 if controller.linkMTUBytes > 0 { linkMTUNote }
+                inertNote("Packet size")
 
                 HStack {
                     Button("Force keyframe") { controller.requestKeyframeNow() }

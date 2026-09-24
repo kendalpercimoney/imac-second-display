@@ -176,3 +176,82 @@ func addressString(_ addr: sockaddr_in) -> String {
     inet_ntop(AF_INET, &a.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN))
     return String(cString: buf)
 }
+
+// MARK: - what the link can actually carry
+
+extension UDPSender {
+    /// The MTU of the interface the kernel chose for this destination, or nil
+    /// if it cannot be determined.
+    ///
+    /// This matters because nothing else notices when it is wrong. Ask for an
+    /// 8900-byte payload on a 1500-byte link and every packet is quietly split
+    /// into six IP fragments; losing any one of them destroys the whole
+    /// datagram, so a link losing a fraction of a percent of fragments loses
+    /// several percent of packets — and the reassembly queues fill as it goes,
+    /// which is why it degrades over minutes rather than failing outright.
+    ///
+    /// Read from `getifaddrs` rather than an `SIOCGIFMTU` ioctl: the AF_LINK
+    /// entry for an interface carries `if_data`, which has the MTU in it, and
+    /// `ifreq`'s union is painful to get at from Swift.
+    var linkMTU: Int? {
+        guard fd >= 0 else { return nil }
+
+        // The socket is connected, so the kernel has already picked the route
+        // and the source address that goes with it.
+        var local = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &local) { p -> Int32 in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &length)
+            }
+        }
+        guard named == 0 else { return nil }
+        let localAddress = local.sin_addr.s_addr
+
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0, let head = first else { return nil }
+        defer { freeifaddrs(head) }
+
+        // Which interface owns that address...
+        var interfaceName: String?
+        var cursor: UnsafeMutablePointer<ifaddrs>? = head
+        while let entry = cursor {
+            if let sa = entry.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) {
+                let addr = UnsafeRawPointer(sa).assumingMemoryBound(to: sockaddr_in.self)
+                if addr.pointee.sin_addr.s_addr == localAddress {
+                    interfaceName = String(cString: entry.pointee.ifa_name)
+                    break
+                }
+            }
+            cursor = entry.pointee.ifa_next
+        }
+        guard let name = interfaceName else { return nil }
+
+        // ...and what that interface's link layer says it can carry.
+        cursor = head
+        while let entry = cursor {
+            if let sa = entry.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_LINK),
+               String(cString: entry.pointee.ifa_name) == name,
+               let data = entry.pointee.ifa_data {
+                let info = data.assumingMemoryBound(to: if_data.self)
+                let mtu = Int(info.pointee.ifi_mtu)
+                return mtu > 0 ? mtu : nil
+            }
+            cursor = entry.pointee.ifa_next
+        }
+        return nil
+    }
+}
+
+/// How big a UDP payload may be before IPv4 has to fragment it: 20 bytes of IP
+/// header plus 8 of UDP.
+let lsIPv4UDPOverhead = 28
+
+/// The payload size to actually use, given what was asked for and what the link
+/// turns out to be. Lives here, next to the MTU lookup, so that the test
+/// compiles the same function the host runs rather than a copy of it that can
+/// drift into agreeing with a broken original.
+func lsEffectiveMTUPayload(requested: Int, linkMTU: Int?, headerSize: Int) -> Int {
+    guard let mtu = linkMTU, requested + lsIPv4UDPOverhead > mtu else { return requested }
+    return max(headerSize + 64, mtu - lsIPv4UDPOverhead)
+}

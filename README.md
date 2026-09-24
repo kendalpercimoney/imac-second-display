@@ -103,7 +103,10 @@ Not tested, in rough order of how likely they are to work:
 
 ## Prebuilt binaries
 
-`build/` holds both apps, if you would rather not compile anything:
+Attached to each [release](https://github.com/kendalpercimoney/imac-second-display/releases),
+if you would rather not compile anything. They used to live in `build/` in the
+tree as well, which meant they went stale against the source between rebuilds;
+the releases are now the only place they come from.
 
 | App | Architecture | Minimum OS | Signing |
 |---|---|---|---|
@@ -155,8 +158,31 @@ Set **MTU: Custom 9000** under Network ▸ Ethernet ▸ Advanced ▸ Hardware on
 machines, then pick the 8900-byte option in the host UI.
 
 Check your USB-C adapter supports it first — many cap at 4000 or ignore the
-setting, and a mismatched MTU shows up as everything working until the first
-keyframe, then nothing.
+setting.
+
+**A custom MTU does not survive a reboot.** Which is the real hazard here: the
+setting in the host stays at 8900 while the link quietly goes back to 1500, and
+nothing complains. An oversized datagram is not rejected, it is split into IP
+fragments and delivered — but losing any one fragment destroys the whole packet,
+so a link dropping a fraction of a percent of fragments drops several percent of
+packets, and the kernel's reassembly queues fill as it goes. It degrades over
+minutes rather than failing outright, which makes it hard to attribute.
+
+You can see it happening:
+
+```bash
+netstat -s -p ip | grep -i fragment
+```
+
+Any growth in "output datagrams fragmented" while streaming means this. On a
+machine where it was happening: 921,196 fragments created from 153,943
+datagrams, almost exactly the six-way split an 8900 B payload takes on a 1500 B
+link, and zero while idle.
+
+The host now asks the interface that routes to the client what it can carry and
+uses the smaller of that and the configured size, says so in the window, and
+logs it. Your setting is left alone, so restoring MTU 9000 on both ends brings
+jumbo frames back on its own.
 
 ### Optional: bigger socket buffers on the iMac
 
@@ -586,6 +612,23 @@ ffplay -protocol_whitelist file,udp,rtp -fflags nobuffer -flags low_delay \
 Even then you are measuring that player's presentation timing, not the
 pipeline. Use the real client for a real number.
 
+### What the host records while it runs
+
+A line a second of throughput, latency, loss and keyframe counts goes to the
+system log, so a problem that takes minutes to appear leaves something behind to
+read afterwards:
+
+```bash
+log show --predicate 'subsystem == "com.lanscreen.host"' --last 15m
+```
+
+```bash
+log stream --predicate 'subsystem == "com.lanscreen.host"'
+```
+
+The same place records the MTU of the link and what packet size was actually
+used.
+
 ## 8. Troubleshooting
 
 **About a second of delay when testing with VLC** — That is VLC's own
@@ -733,4 +776,5 @@ Tests/
   IdleCost/main.swift    measures what an idle screen costs to stream
   run_loopback_test.sh   headless: unit tests + encode/decode round trip
   run_render_test.sh     the OpenGL path, checked numerically
+  PathMTU/main.swift     link MTU discovery and the payload clamp
 ```

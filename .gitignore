@@ -1,10 +1,10 @@
 # SwiftPM build products
 .build/
 
-# Ship the two app bundles, but nothing else that lands in build/
-build/*
-!build/LanScreenHost.app/
-!build/LanScreenClient.app/
+# Built apps are attached to releases rather than committed. Keeping them in
+# the tree meant they went stale against the source between rebuilds, and a
+# binary that does not match the code beside it is worse than no binary.
+build/
 
 # macOS
 .DS_Store

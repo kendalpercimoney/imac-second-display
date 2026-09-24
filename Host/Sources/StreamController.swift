@@ -14,6 +14,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
 import Foundation
+import os
 import CoreMedia
 import CoreVideo
 import LSProtocol
@@ -44,6 +45,10 @@ final class StreamController: ObservableObject {
     @Published private(set) var client = ControlChannel.ClientState()
     @Published private(set) var keyframeRequests: Int = 0
     @Published private(set) var sdpPath: String?
+    /// What the outgoing interface says it can carry, and what we settled on
+    /// sending. Both 0 until a stream has started.
+    @Published private(set) var linkMTUBytes: Int = 0
+    @Published private(set) var effectiveMTUPayload: Int = 0
     @Published private(set) var activeSourceDescription: String = ""
     @Published private(set) var wakeStatus: String = ""
     @Published private(set) var fullPerformanceHeld = false
@@ -76,6 +81,9 @@ final class StreamController: ObservableObject {
     private var lastEncodeSubmitTime: TimeInterval = 0
     private var forceKeyframeFlag = false
     private var sdpWritten = false
+    /// When the current stream started, so the log lines carry an elapsed time
+    /// rather than only a wall clock.
+    private var startedAt: Date?
 
     // Stats counters, touched from several threads behind statsLock.
     private let statsLock = NSLock()
@@ -237,12 +245,17 @@ final class StreamController: ObservableObject {
             do {
                 try await startPipeline()
                 onMain {
+                    self.startedAt = Date()
                     self.isRunning = true
                     self.statusText = "Streaming to \(self.settings.clientAddress):\(self.settings.videoPort)"
+                    StreamController.statsLog.info(
+                        "stream started \(self.settings.width, privacy: .public)x\(self.settings.height, privacy: .public) @ \(self.settings.frameRate, privacy: .public), \(self.settings.bitrateMbps, format: .fixed(precision: 0), privacy: .public) Mb/s")
                 }
             } catch {
                 await teardown()
                 onMain {
+                    StreamController.statsLog.error(
+                        "stream failed to start: \(error.localizedDescription, privacy: .public)")
                     self.lastError = error.localizedDescription
                     self.statusText = "Failed"
                     self.isRunning = false
@@ -257,6 +270,9 @@ final class StreamController: ObservableObject {
         Task {
             await teardown()
             onMain {
+                StreamController.statsLog.info(
+                    "stream stopped after \(Int(Date().timeIntervalSince(self.startedAt ?? Date())), privacy: .public)s")
+                self.startedAt = nil
                 self.isRunning = false
                 self.statusText = "Idle"
                 self.outgoingMbps = 0
@@ -279,7 +295,41 @@ final class StreamController: ObservableObject {
 
         let sender = try UDPSender(host: settings.clientAddress,
                                    port: UInt16(settings.videoPort))
-        let packetizer = RTPPacketizer(sender: sender, mtuPayload: settings.mtuPayload)
+        // Jumbo frames are a setting here but a property of the cable, the
+        // adapter and both machines. A manually raised MTU does not survive a
+        // reboot, so a setting that was right yesterday can be wrong today with
+        // nothing to show for it except a stream that slowly falls apart: an
+        // oversized datagram is not rejected, it is split into IP fragments, and
+        // losing any one fragment destroys the whole packet.
+        let requestedPayload = settings.mtuPayload
+        let linkMTU = sender.linkMTU
+        let effectivePayload = lsEffectiveMTUPayload(requested: requestedPayload,
+                                                     linkMTU: linkMTU,
+                                                     headerSize: Int(LS_RTP_HEADER_SIZE))
+        var pathWarnings: [String] = []
+        if let mtu = linkMTU, effectivePayload != requestedPayload {
+            pathWarnings.append(
+                "Packet size set to \(requestedPayload) B but the link to "
+                + "\(settings.clientAddress) has an MTU of \(mtu). Every packet would be "
+                + "split into \(Int(ceil(Double(requestedPayload + lsIPv4UDPOverhead) / Double(mtu)))) "
+                + "IP fragments and one lost fragment destroys the whole packet, so "
+                + "\(effectivePayload) B is being used instead. To get jumbo frames back, set "
+                + "MTU 9000 on this Mac and the client — it is not persistent across a reboot.")
+        }
+        onMain {
+            self.linkMTUBytes = linkMTU ?? 0
+            self.effectiveMTUPayload = effectivePayload
+            // Published here rather than with the encoder's warnings at the end
+            // of startPipeline: if anything in between throws, this is exactly
+            // the warning you still want to have seen.
+            self.warnings = pathWarnings
+        }
+        if let mtu = linkMTU {
+            StreamController.statsLog.info(
+                "link mtu=\(mtu, privacy: .public) requested payload=\(requestedPayload, privacy: .public) using=\(effectivePayload, privacy: .public)")
+        }
+
+        let packetizer = RTPPacketizer(sender: sender, mtuPayload: effectivePayload)
 
         let control = ControlChannel()
         control.onKeyframeRequested = { [weak self] in
@@ -367,7 +417,7 @@ final class StreamController: ObservableObject {
                                 frameRate: settings.frameRate,
                                 showsCursor: settings.showsCursor)
 
-        onMain { self.warnings = encoderWarnings }
+        onMain { self.warnings = pathWarnings + encoderWarnings }
         startIdleHeartbeat()
         await MainActor.run { self.startStatsTimer() }
     }
@@ -389,15 +439,17 @@ final class StreamController: ObservableObject {
         let display = try LSVirtualDisplay(width: UInt(settings.width),
                                            height: UInt(settings.height),
                                            refreshRate: Double(settings.frameRate),
-                                           hiDPI: settings.hiDPI,
                                            name: "LanScreen")
         virtualDisplay = display
-        activeSourceDescription =
-            "Virtual display \(display.displayID) — \(display.width)×\(display.height)"
 
         // The window server needs a moment to publish the new display before
         // SCShareableContent will list it.
         try? await Task.sleep(nanoseconds: 500_000_000)
+        display.refreshModeGeometry()
+        activeSourceDescription =
+            "Virtual display \(display.displayID) — \(display.modePointsWide)×\(display.modePointsHigh)"
+            + (display.modePixelsWide != display.modePointsWide
+               ? " (\(display.modePixelsWide)×\(display.modePixelsHigh) pixels)" : "")
         return display.displayID
     }
 
@@ -541,8 +593,38 @@ final class StreamController: ObservableObject {
             if pipelineSamples > 0 {
                 self.hostPipelineMilliseconds = pipelineMillis / Double(pipelineSamples)
             }
+            self.logStatsLine()
         }
     }
+
+    /// A line a second to the system log, so "it got slower after a few
+    /// minutes" leaves something behind that can be read afterwards. Nothing in
+    /// the app keeps a history otherwise, and by the time you notice a
+    /// degradation the numbers that would explain it are gone.
+    ///
+    ///     log show --predicate 'subsystem == "com.lanscreen.host"' --last 15m
+    ///     log stream --predicate 'subsystem == "com.lanscreen.host"'
+    private func logStatsLine() {
+        guard isRunning else { return }
+        let uptime = Int(Date().timeIntervalSince(startedAt ?? Date()))
+        StreamController.statsLog.info("""
+            t=\(uptime, privacy: .public)s \
+            mbps=\(self.outgoingMbps, format: .fixed(precision: 1), privacy: .public) \
+            fps=\(self.encodedFPS, format: .fixed(precision: 0), privacy: .public) \
+            encode=\(self.encodeMilliseconds, format: .fixed(precision: 2), privacy: .public)ms \
+            pipeline=\(self.hostPipelineMilliseconds, format: .fixed(precision: 2), privacy: .public)ms \
+            rtt=\(self.client.rttMilliseconds, format: .fixed(precision: 2), privacy: .public)ms \
+            decode=\(Double(self.client.stats.decode_us) / 1000, format: .fixed(precision: 2), privacy: .public)ms \
+            render=\(Double(self.client.stats.render_us) / 1000, format: .fixed(precision: 2), privacy: .public)ms \
+            lost=\(self.client.stats.packets_lost, privacy: .public) \
+            dropped=\(self.client.stats.frames_dropped, privacy: .public) \
+            corrupt=\(self.client.stats.frames_corrupt, privacy: .public) \
+            keyframes=\(self.keyframeRequests, privacy: .public) \
+            fullperf=\(self.fullPerformanceHeld, privacy: .public)
+            """)
+    }
+
+    static let statsLog = Logger(subsystem: "com.lanscreen.host", category: "stats")
 
     // MARK: - SDP, for testing with VLC/ffplay before touching the iMac
 

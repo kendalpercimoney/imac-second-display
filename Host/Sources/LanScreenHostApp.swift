@@ -113,11 +113,6 @@ struct ContentView: View {
                           systemImage: "display.2")
                         .font(.caption).foregroundStyle(.secondary)
 
-                    Toggle("HiDPI backing store", isOn: $settings.hiDPI)
-                        .disabled(controller.isRunning)
-                        .help("Leave off. It doubles the pixels the encoder has to "
-                              + "process for no benefit on a 2010 panel.")
-
                     if !controller.virtualDisplaySupported {
                         Label("This macOS does not expose CGVirtualDisplay. Use a hardware "
                               + "HDMI dummy plug and capture it as an existing display.",
@@ -208,6 +203,20 @@ struct ContentView: View {
         }
     }
 
+    /// Split out of the Network section because the type checker gave up on it
+    /// inline.
+    private var linkMTUNote: some View {
+        let mtu = controller.linkMTUBytes
+        let fits = controller.effectiveMTUPayload == settings.mtuPayload
+        let text = "The link to \(settings.clientAddress) reports an MTU of \(mtu) B, so the "
+            + "largest packet that does not get split into IP fragments carries "
+            + "\(mtu - lsIPv4UDPOverhead) B."
+        return Text(text)
+            .font(.caption)
+            .foregroundStyle(fits ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private var networkSection: some View {
         GroupBox("Network") {
             VStack(alignment: .leading, spacing: 8) {
@@ -216,6 +225,8 @@ struct ContentView: View {
                     Text("8900 B — jumbo frames (MTU 9000 on both ends)").tag(Int(LS_JUMBO_MTU_PAYLOAD))
                 }
                 .disabled(controller.isRunning)
+
+                if controller.linkMTUBytes > 0 { linkMTUNote }
 
                 HStack {
                     Button("Force keyframe") { controller.requestKeyframeNow() }

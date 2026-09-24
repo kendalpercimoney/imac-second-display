@@ -295,6 +295,19 @@ struct MenuBarPanel: View {
                     controller.sendClientSettingsNow()
                 }
 
+                if controller.isRunning && settings.audioEnabled && controller.client.playsAudio {
+                    HStack(spacing: 10) {
+                        readout("Buffered", controller.client.stats.audio_buffered_us > 0
+                                ? String(format: "%.0f ms",
+                                         Double(controller.client.stats.audio_buffered_us) / 1000)
+                                : "—")
+                        readout("Gaps", "\(controller.client.stats.audio_underruns)",
+                                alarm: controller.client.stats.audio_underruns > 0)
+                        readout("Dropped", "\(controller.client.stats.audio_overruns)",
+                                alarm: controller.client.stats.audio_overruns > 0)
+                    }
+                }
+
                 if settings.audioEnabled && controller.client.hasSaidHello
                     && !controller.client.playsAudio {
                     Text("This client cannot play audio. Rebuild it.")

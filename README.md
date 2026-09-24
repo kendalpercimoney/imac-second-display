@@ -157,6 +157,45 @@ value has its own test, because a negative number travelling through an unsigned
 field is precisely the kind of thing that works for positive values and silently
 does not for negative ones; that one was confirmed by masking the sign bit off.
 
+### Why it popped, which was three separate things
+
+A click is a discontinuity. There were three places producing one.
+
+**Halving the audio queue buffers.** They went from three of 10 ms to three of
+5 to give the delay slider more negative range. A 5 ms buffer has to be refilled
+two hundred times a second by a 2010 machine that is also decoding 1080p H.264,
+and every callback it is late for is a gap. They are back to 10 ms, and the
+floor is 30 ms again. The extra 15 ms is worth not hearing.
+
+**Filling gaps with a memset.** When the ring ran dry the shortfall was zeroed,
+which steps from wherever the waveform was straight to zero, and then steps back
+when audio resumes. Two clicks per gap. It now fades out over about a
+millisecond and fades back in, so a gap is a brief dip instead of a crack.
+
+**Letting clock drift accumulate.** The two machines sample at 48 kHz on their
+own crystals, which differ by tens of parts per million, so the buffer creeps
+one way or the other forever. Left alone it eventually hit the end of the ring
+and a whole block was dropped at once — plainly audible, and on a regular
+cycle. A single frame is now trimmed when it drifts past its slack, which at
+48 kHz is twenty microseconds and inaudible.
+
+The trim rate follows the excess rather than being one frame a packet. One a
+packet clears real drift fifty times over, but recovering from an actual
+excursion — the audio device stalling, a burst from the host — would then take
+a quarter of a minute, and all of that time is lag you hear against the picture.
+It is capped at 16 frames, a third of a millisecond.
+
+The test measures the thing itself: the largest jump between consecutive samples
+either side of a gap. Stepping to zero from a signal at 20,000 gives a jump of
+20,000; the fade gives about 400. Confirmed by putting the memset back, which
+reports a step of exactly 20,000 — the click, reproduced as a number.
+
+The client now reports its audio underruns, dropped frames and buffer depth in
+its once-a-second statistics, so the host logs them and the panel shows them.
+The next time something is audibly wrong there will be numbers rather than
+guesses. Older clients send the shorter message and still parse, with the audio
+counters simply absent.
+
 ### The iMac's screen brightness
 
 A slider on the host, applied on the iMac through `IODisplaySetFloatParameter`.

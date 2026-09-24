@@ -555,13 +555,14 @@ static void testAudioPackets(void) {
 
 static void testAudioRing(void) {
     printf("audio ring buffer and delay line\n");
-    // 48 kHz stereo, so one millisecond is 96 samples.
+    // 48 kHz stereo, so one millisecond is 96 samples and 48 frames.
+    // Counts are checked in frames played rather than by looking for non-zero
+    // samples: the gap concealment fades across the edges of a drain, so the
+    // exact sample values there are deliberately not the input any more.
     LSAudioPlayer *player = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
     [player setTargetBufferMilliseconds:0];
 
     int16_t out[8192];
-    // Nothing has arrived, so a drain must produce silence rather than noise
-    // and must not claim to have played anything.
     memset(out, 0xAB, sizeof(out));
     [player drainInto:out samples:256];
     int silent = 1;
@@ -569,48 +570,55 @@ static void testAudioRing(void) {
     CHECK(silent, "an empty ring did not produce silence");
     CHECK([player framesPlayed] == 0, "an empty ring claimed to have played frames");
 
-    // With no delay asked for, audio is playable the moment it lands.
     int16_t ramp[8192];
     for (int i = 0; i < 8192; i++) ramp[i] = (int16_t)(i + 1);
-    [player enqueueSamples:ramp frames:128];       // 256 samples
+
+    // With no delay asked for, audio is playable the moment it lands. The first
+    // drain after silence is faded in, so the exact-order check uses the second.
+    [player enqueueSamples:ramp frames:2048];
+    [player drainInto:out samples:256];
     [player drainInto:out samples:256];
     int ordered = 1;
-    for (int i = 0; i < 256; i++) if (out[i] != ramp[i]) { ordered = 0; break; }
+    for (int i = 0; i < 256; i++) if (out[i] != ramp[256 + i]) { ordered = 0; break; }
     CHECK(ordered, "with no delay the ring did not return what went in, in order");
 
     // The delay line proper: with a 10 ms target (960 samples) exactly that
-    // much must stay behind, and only what is in excess of it comes out.
+    // much stays behind, and only what is in excess of it comes out.
     LSAudioPlayer *delayed = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
     [delayed setTargetBufferMilliseconds:10];
     CHECK([delayed targetBufferMilliseconds] > 9.9 && [delayed targetBufferMilliseconds] < 10.1,
           "the target was not what was asked for");
 
     [delayed enqueueSamples:ramp frames:480];      // exactly 960 samples = 10 ms
-    memset(out, 0xAB, sizeof(out));
     [delayed drainInto:out samples:256];
-    silent = 1;
-    for (int i = 0; i < 256; i++) if (out[i] != 0) { silent = 0; break; }
-    CHECK(silent, "the delay line played audio it was supposed to be holding");
+    CHECK([delayed framesPlayed] == 0,
+          "the delay line played %u frames it was supposed to be holding",
+          [delayed framesPlayed]);
 
     // One millisecond more, and exactly one millisecond becomes playable.
-    [delayed enqueueSamples:ramp + 960 frames:48]; // 96 samples
-    memset(out, 0xAB, sizeof(out));
+    [delayed enqueueSamples:ramp + 960 frames:48];
+    uint32_t before = [delayed framesPlayed];
     [delayed drainInto:out samples:256];
-    int playedCount = 0;
-    for (int i = 0; i < 256; i++) if (out[i] != 0) playedCount++;
-    CHECK(playedCount == 96, "the delay line released %d samples, not 96", playedCount);
-    // And what came out is the OLDEST audio, not the newest: a delay line is
-    // first in, first out, otherwise it is just a reordering bug.
-    CHECK(out[0] == ramp[0], "the delay line released the newest audio first");
+    CHECK([delayed framesPlayed] - before == 48,
+          "the delay line released %u frames, not 48", [delayed framesPlayed] - before);
+
+    // First in, first out. Checked on a clean drain -- enough queued that the
+    // drain is satisfied in full, and not the first one after a gap -- so no
+    // fade touches the samples being compared.
+    LSAudioPlayer *fifo = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [fifo setTargetBufferMilliseconds:0];
+    [fifo enqueueSamples:ramp frames:2048];
+    [fifo drainInto:out samples:512];
+    [fifo drainInto:out samples:512];
+    CHECK(out[0] == ramp[512], "the delay line is not first in, first out (%d, wanted %d)",
+          (int)out[0], (int)ramp[512]);
 
     // Overrun: push far more than the ring holds and the oldest audio is what
     // goes, because what has just arrived is what the screen is showing now.
+    // Markers are kept small: these are int16 samples, and a marker that
+    // overflows wraps negative and makes a late round look like an early one.
     LSAudioPlayer *small = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
     [small setTargetBufferMilliseconds:0];
-    // Each block is stamped with its round number. Kept small deliberately:
-    // these are int16 samples, and a marker that overflows wraps negative and
-    // makes a late round look like an early one, which is how the first
-    // version of this check failed against correct code.
     for (int round = 0; round < 40; round++) {
         int16_t block[2048];
         for (int i = 0; i < 2048; i++) block[i] = (int16_t)(round * 500 + 1);
@@ -618,19 +626,16 @@ static void testAudioRing(void) {
     }
     CHECK([small overruns] > 0, "overflowing the ring did not count an overrun");
     [small drainInto:out samples:64];
-    CHECK(out[0] != 0, "after an overrun the ring returned silence");
-    // The ring holds 400 ms of a stream far longer than that, so what survives
-    // must come from the later rounds -- anything under round ten would mean
-    // the newest audio was the part thrown away.
     CHECK(out[0] > 5000, "an overrun dropped the newest audio instead of the oldest (%d)",
           (int)out[0]);
 
-    // Underrun: keep draining past what is there and the shortfall is silence.
-    uint32_t before = [player underruns];
-    [player drainInto:out samples:4096];
-    CHECK([player underruns] == before + 1, "running dry did not count an underrun");
+    // Underrun: keep draining past what is there. The shortfall is faded out
+    // and then silent, so it is the tail that must be zero, not the whole of it.
+    uint32_t underrunsBefore = [player underruns];
+    [player drainInto:out samples:8192];
+    CHECK([player underruns] == underrunsBefore + 1, "running dry did not count an underrun");
     int tailSilent = 1;
-    for (int i = 0; i < 4096; i++) if (out[i] != 0) { tailSilent = 0; break; }
+    for (int i = 4096; i < 8192; i++) if (out[i] != 0) { tailSilent = 0; break; }
     CHECK(tailSilent, "the shortfall was not padded with silence");
 }
 
@@ -686,6 +691,113 @@ static void testAudioDelayAndBrightness(void) {
     CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "an over-range brightness was accepted");
 }
 
+/// The largest jump between consecutive samples of the same channel. A click is
+/// a discontinuity, so this is the thing to measure: a signal that steps
+/// straight to zero has a jump the size of the signal, and one that is faded
+/// out has jumps the size of a fade step.
+static int maxStep(const int16_t *samples, int count, int channels) {
+    int worst = 0;
+    for (int i = channels; i < count; i++) {
+        int delta = (int)samples[i] - (int)samples[i - channels];
+        if (delta < 0) delta = -delta;
+        if (delta > worst) worst = delta;
+    }
+    return worst;
+}
+
+static void testAudioConcealment(void) {
+    printf("underrun concealment and clock drift\n");
+    LSAudioPlayer *player = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [player setTargetBufferMilliseconds:0];
+
+    // A loud, constant signal. Running out of it and stepping to zero would be
+    // a 20000-unit discontinuity, which is a click you would certainly hear.
+    int16_t loud[4096];
+    for (int i = 0; i < 4096; i++) loud[i] = 20000;
+
+    int16_t out[4096];
+    [player enqueueSamples:loud frames:100];          // 200 samples
+    memset(out, 0, sizeof(out));
+    [player drainInto:out samples:2048];              // far more than is there
+    CHECK([player underruns] == 1, "the underrun was not counted");
+
+    int step = maxStep(out, 2048, 2);
+    // A one millisecond fade from 20000 is about 417 per step. Allow generous
+    // headroom; what matters is that it is nothing like a 20000 cliff.
+    CHECK(step < 2000, "leaving a gap stepped by %d, which is a click", step);
+
+    // And coming back from the gap must ramp up, not step up.
+    [player enqueueSamples:loud frames:200];
+    memset(out, 0, sizeof(out));
+    [player drainInto:out samples:400];
+    CHECK(out[0] < 2000, "returning from a gap started at %d, which is a click",
+          (int)out[0]);
+    step = maxStep(out, 400, 2);
+    CHECK(step < 2000, "returning from a gap stepped by %d", step);
+
+    // Clock drift: the host's 48 kHz and this machine's are never the same, so
+    // the buffer creeps. It must be trimmed a frame at a time rather than
+    // allowed to pile up until the ring overflows and drops a lump.
+    LSAudioPlayer *drifting = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [drifting setTargetBufferMilliseconds:25];
+    // Start it 150 ms deep -- an excursion, not drift: the audio device stalling
+    // for a moment, or a burst from the host. All of that depth is latency you
+    // hear against the picture, so it has to come back, and quickly.
+    for (int i = 0; i < 28; i++) [drifting enqueueSamples:loud frames:256];
+    double startedAt = [drifting bufferedMilliseconds];
+    CHECK(startedAt > 100, "the excursion did not take (%.1f ms)", startedAt);
+
+    // Then a balanced stream: as much in as out, so anything that comes back is
+    // the correction doing it and not the drain outpacing the source.
+    int packets = 0;
+    while (packets < 4000 && [drifting bufferedMilliseconds] > 25 + 40 + 5) {
+        [drifting enqueueSamples:loud frames:256];
+        [drifting drainInto:out samples:512];        // 256 frames
+        packets++;
+    }
+    CHECK([drifting driftTrims] > 0, "a buffer past its slack was not trimmed");
+    CHECK([drifting overruns] == 0,
+          "the excursion was left to pile up until the ring overflowed (%u frames)",
+          [drifting overruns]);
+    CHECK([drifting bufferedMilliseconds] <= 25 + 40 + 5,
+          "the buffer never came back down (%.1f ms after %d packets)",
+          [drifting bufferedMilliseconds], packets);
+    // 256 frames is 5.33 ms, so this is how long it took in real time.
+    CHECK(packets < 600, "it took %d packets (%.1f s) to recover, which is too long",
+          packets, packets * 256.0 / 48000.0);
+}
+
+static void testStatsAudioFields(void) {
+    printf("stats carry the audio counters, old messages still parse\n");
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+    ls_stats stats;
+    memset(&stats, 0, sizeof(stats));
+    stats.frames_decoded = 1234;
+    stats.queue_depth = 3;
+    stats.audio_underruns = 17;
+    stats.audio_overruns = 5;
+    stats.audio_buffered_us = 41000;
+
+    size_t n = ls_ctrl_build_stats(buffer, sizeof(buffer), &stats);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "stats did not parse");
+    CHECK(message.stats.frames_decoded == 1234 && message.stats.queue_depth == 3,
+          "the original stats fields stopped round tripping");
+    CHECK(message.stats.audio_underruns == 17 && message.stats.audio_overruns == 5 &&
+          message.stats.audio_buffered_us == 41000, "the audio counters did not round trip");
+
+    // A client built before audio existed sends the shorter message. It must
+    // still parse, with the audio counters simply absent, rather than the whole
+    // report being thrown away.
+    uint8_t older[LS_CTRL_MAX_SIZE];
+    memcpy(older, buffer, n);
+    older[6] = (uint8_t)(((n - 12) >> 8) & 0xFF);
+    older[7] = (uint8_t)((n - 12) & 0xFF);
+    CHECK(ls_ctrl_parse(older, n - 12, &message) == 0, "a pre-audio stats message was rejected");
+    CHECK(message.stats.frames_decoded == 1234, "the older message lost its counters");
+    CHECK(message.stats.audio_underruns == 0, "the older message invented audio counters");
+}
+
 int main(void) {
     @autoreleasepool {
         testSingleAndFragmented();
@@ -699,6 +811,8 @@ int main(void) {
         testAudioPackets();
         testAudioRing();
         testAudioDelayAndBrightness();
+        testAudioConcealment();
+        testStatsAudioFields();
 
         if (gFailures == 0) {
             printf("\nAll depacketizer tests passed.\n");

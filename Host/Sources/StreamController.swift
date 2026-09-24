@@ -726,6 +726,9 @@ final class StreamController: ObservableObject {
             dropped=\(self.client.stats.frames_dropped, privacy: .public) \
             corrupt=\(self.client.stats.frames_corrupt, privacy: .public) \
             keyframes=\(self.keyframeRequests, privacy: .public) \
+            audio_under=\(self.client.stats.audio_underruns, privacy: .public) \
+            audio_over=\(self.client.stats.audio_overruns, privacy: .public) \
+            audio_buf=\(Double(self.client.stats.audio_buffered_us) / 1000, format: .fixed(precision: 1), privacy: .public)ms \
             fullperf=\(self.fullPerformanceHeld, privacy: .public)
             """)
     }

@@ -57,6 +57,10 @@
 /// Times the queue asked for audio and there was none: the number that says
 /// whether the buffer is deep enough.
 @property (nonatomic, readonly) uint32_t underruns;
+/// Single frames trimmed to keep the buffer near its target as the two
+/// machines' clocks drift apart. These are inaudible; the counter is here so it
+/// is obvious that drift is being handled rather than accumulating.
+@property (nonatomic, readonly) uint32_t driftTrims;
 /// Frames thrown away because the buffer was full, which means the host is
 /// running faster than this machine's clock.
 @property (nonatomic, readonly) uint32_t overruns;

@@ -233,6 +233,11 @@ typedef struct {
     uint32_t decode_us;
     uint32_t render_us;
     uint32_t queue_depth;
+    /* Audio. Appended after the fields above, so a client built before audio
+     * existed still sends a shorter STATS that parses fine. */
+    uint32_t audio_underruns;   /* gaps the client had to conceal            */
+    uint32_t audio_overruns;    /* frames dropped because the ring filled    */
+    uint32_t audio_buffered_us; /* what is waiting, which is the delay it adds */
 } ls_stats;
 
 typedef struct {

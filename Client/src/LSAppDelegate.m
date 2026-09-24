@@ -430,6 +430,11 @@
         stats.decode_us        = [_decoder decodeMicroseconds];
         stats.render_us        = [_glView renderMicroseconds];
         stats.queue_depth      = [_decoder queueDepth];
+        if (_audioPlayer) {
+            stats.audio_underruns   = [_audioPlayer underruns];
+            stats.audio_overruns    = [_audioPlayer overruns];
+            stats.audio_buffered_us = (uint32_t)([_audioPlayer bufferedMilliseconds] * 1000.0);
+        }
         [_control sendStats:&stats];
 
         // Until video shows up, keep saying hello. The host resends its

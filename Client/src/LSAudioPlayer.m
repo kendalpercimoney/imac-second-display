@@ -21,12 +21,23 @@
 // machine this old; more and you are just adding delay. The ring behind them
 // holds 200 ms, which is not a target depth -- it is headroom so a burst is
 // absorbed rather than dropped.
-// Three buffers of 5 ms rather than 10. These are the hardware floor: nothing
-// the delay control does can pull audio earlier than what is already sitting in
-// the audio queue, so the smaller they are the further negative the slider can
-// usefully go. 15 ms total, against the 30 it was.
+// Three buffers of 10 ms. This was briefly 5, to let the delay control go
+// further negative, and that is when the sound started popping: a 5 ms buffer
+// has to be refilled two hundred times a second by a 2010 machine that is also
+// decoding 1080p H.264, and every callback it is late for is a gap. The extra
+// 15 ms of floor is worth not hearing.
 #define LS_AQ_BUFFERS        3
-#define LS_AQ_BUFFER_MS      5
+#define LS_AQ_BUFFER_MS      10
+// About a millisecond at 48 kHz. Long enough to remove the step, short enough
+// that it is not itself audible as a swell.
+#define LS_FADE_FRAMES       48
+// How far the buffer may drift past the target before a single frame is
+// trimmed. Two machines' 48 kHz clocks differ by tens of parts per million, so
+// the buffer creeps one way or the other no matter what; the question is only
+// whether the correction is one inaudible frame or an audible lump.
+#define LS_DRIFT_SLACK_MS    40
+// The most frames one packet may trim: 16 is a third of a millisecond.
+#define LS_MAX_TRIM_FRAMES   16
 #define LS_RING_MS           400
 // The ring holds this much back at all times, which is what makes it a delay
 // line rather than just somewhere packets land. Below about 20 ms every network
@@ -54,6 +65,12 @@
     /// How much audio the ring keeps behind at all times. Each sample waits
     /// this long before it is played, so this *is* the delay.
     uint32_t _targetSamples;
+
+    /// The last real sample played on each channel, so a gap can be faded into
+    /// rather than stepped into. Jumping straight to zero is a discontinuity,
+    /// and a discontinuity is exactly what a click is.
+    int16_t  _lastSample[8];
+    BOOL     _inSilence;
 }
 
 - (id)initWithSampleRate:(uint32_t)sampleRate channels:(uint32_t)channels {
@@ -168,6 +185,37 @@ static void LSAudioCallback(void *userData, AudioQueueRef queue, AudioQueueBuffe
     uint32_t count = frames * _channels;
 
     pthread_mutex_lock(&_lock);
+
+    // Clock drift, corrected one frame at a time. The host samples on its clock
+    // and this machine plays on its own; they are never exactly equal, so the
+    // buffer creeps. Left alone it eventually hits the end of the ring and a
+    // whole block gets dropped at once, which is plainly audible. Trimming a
+    // single frame when it has crept far enough is not: one frame at 48 kHz is
+    // twenty microseconds.
+    uint32_t slack = (uint32_t)((uint64_t)_sampleRate * _channels * LS_DRIFT_SLACK_MS / 1000);
+    if (_fill > _targetSamples + slack) {
+        // How much to take is proportional to how far past the line it is. One
+        // frame a packet is ample for clock drift, but recovering from a real
+        // excursion -- the audio device stalling for a moment, a burst from the
+        // host -- would then take tens of seconds, and all of that time is
+        // latency you can hear against the picture. The cap is 16 frames, which
+        // is a third of a millisecond: still far too short to be audible as a
+        // splice, and it brings a tenth of a second back in a couple of seconds.
+        uint32_t excessFrames = (_fill - (_targetSamples + slack)) / _channels;
+        // One frame a packet clears clock drift many times over, but on its own
+        // it takes a quarter of a minute to walk back a tenth of a second, and
+        // every millisecond of that is lag against the picture. So the rate
+        // follows the excess: deep excursions come back in a second or two,
+        // and the last few frames of drift still go one at a time.
+        uint32_t trimFrames = 1 + excessFrames / 128;
+        if (trimFrames > LS_MAX_TRIM_FRAMES) trimFrames = LS_MAX_TRIM_FRAMES;
+        uint32_t trimSamples = trimFrames * _channels;
+        if (trimSamples > _fill) trimSamples = _fill;
+        _readIndex = (_readIndex + trimSamples) % _ringSamples;
+        _fill -= trimSamples;
+        _driftTrims += trimSamples / _channels;
+    }
+
     uint32_t space = _ringSamples - _fill;
     if (count > space) {
         // The host is producing faster than this machine consumes, or the
@@ -201,9 +249,39 @@ static void LSAudioCallback(void *userData, AudioQueueRef queue, AudioQueueBuffe
         _readIndex = (_readIndex + 1) % _ringSamples;
     }
     _fill -= take;
+
+    if (take > 0) {
+        // Coming back from a gap, ramp up rather than stepping up.
+        if (_inSilence) {
+            uint32_t fade = LS_FADE_FRAMES * _channels;
+            if (fade > take) fade = take;
+            for (uint32_t i = 0; i < fade; i++) {
+                out[i] = (int16_t)((int32_t)out[i] * (int32_t)i / (int32_t)fade);
+            }
+            _inSilence = NO;
+        }
+        for (uint32_t channel = 0; channel < _channels && channel < 8; channel++) {
+            _lastSample[channel] = out[take - _channels + channel];
+        }
+    }
+
     if (take < wanted) {
-        memset(out + take, 0, (wanted - take) * sizeof(int16_t));
+        // Ramp down to silence from wherever the signal actually was. A memset
+        // here is a step discontinuity, and two of them per gap -- one leaving,
+        // one returning -- is what a run of underruns sounds like.
+        uint32_t gap = wanted - take;
+        uint32_t fade = LS_FADE_FRAMES * _channels;
+        if (fade > gap) fade = gap;
+        for (uint32_t i = 0; i < fade; i += _channels) {
+            for (uint32_t channel = 0; channel < _channels; channel++) {
+                int32_t value = (channel < 8) ? _lastSample[channel] : 0;
+                out[take + i + channel] =
+                    (int16_t)(value * (int32_t)(fade - i) / (int32_t)fade);
+            }
+        }
+        if (gap > fade) memset(out + take + fade, 0, (gap - fade) * sizeof(int16_t));
         _underruns++;
+        _inSilence = YES;
     }
     _framesPlayed += take / _channels;
     pthread_mutex_unlock(&_lock);

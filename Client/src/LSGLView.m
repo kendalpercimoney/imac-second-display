@@ -46,6 +46,9 @@
     pthread_mutex_t _renderMutex;
     pthread_cond_t _renderCond;
     BOOL _renderDirty;
+    /// Drawing more often than the panel refreshes is work nobody can see.
+    uint64_t _minimumDrawInterval;
+    uint64_t _lastDrawTime;
     volatile BOOL _renderRunning;
     // AppKit accessors like -window and -bounds are not safe to call from a
     // background thread, and can wait on AppKit's own lock while the main
@@ -143,11 +146,51 @@
         while (!_renderDirty && _renderRunning) {
             pthread_cond_wait(&_renderCond, &_renderMutex);
         }
+
+        // Something wants drawing. Before drawing it, wait out whatever is left
+        // of this refresh interval, and let every other update that arrives
+        // meanwhile fold into the same draw.
+        //
+        // The pointer arrives a hundred and twenty times a second and each
+        // arrival marks the view dirty. On a sixty hertz panel half of those
+        // draws are of a frame nobody will ever see, and a full-screen redraw
+        // on a 2010 GPU is not cheap: moving the pointer measured at +76% CPU
+        // over the video alone, and a quarter of that was these invisible
+        // draws. Coalescing costs nothing visible -- the newest state is still
+        // what gets drawn -- and the wait is on the condition variable, so a
+        // frame arriving during it is absorbed rather than delayed past it.
+        if (_minimumDrawInterval > 0) {
+            uint64_t now = mach_absolute_time();
+            uint64_t sinceLast = now - _lastDrawTime;
+            if (_lastDrawTime != 0 && sinceLast < _minimumDrawInterval) {
+                uint64_t remaining = _minimumDrawInterval - sinceLast;
+                double remainingNanos = (double)remaining * (double)_timebase.numer
+                                      / (double)_timebase.denom;
+                struct timespec deadline;
+                clock_gettime(CLOCK_REALTIME, &deadline);
+                deadline.tv_nsec += (long)remainingNanos;
+                deadline.tv_sec += deadline.tv_nsec / 1000000000L;
+                deadline.tv_nsec %= 1000000000L;
+                // A timed wait rather than a sleep: it releases the mutex, so
+                // producers never block on the render thread napping.
+                pthread_cond_timedwait(&_renderCond, &_renderMutex, &deadline);
+            }
+        }
+
         _renderDirty = NO;
         pthread_mutex_unlock(&_renderMutex);
         if (!_renderRunning) break;
+        _lastDrawTime = mach_absolute_time();
         @autoreleasepool { [self renderNow]; }
     }
+}
+
+/// Draws no more often than this. Zero removes the limit.
+- (void)setMaximumDrawsPerSecond:(double)rate {
+    if (rate <= 0) { _minimumDrawInterval = 0; return; }
+    double nanos = 1e9 / rate;
+    _minimumDrawInterval = (uint64_t)(nanos * (double)_timebase.denom
+                                            / (double)_timebase.numer);
 }
 
 - (BOOL)isOpaque { return YES; }

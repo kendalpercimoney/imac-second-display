@@ -114,7 +114,11 @@ func makeFrame(_ index: Int) -> CVPixelBuffer {
 }
 
 let sender = try UDPSender(host: host, port: port)
-let packetizer = RTPPacketizer(sender: sender, mtuPayload: Int(LS_DEFAULT_MTU_PAYLOAD))
+// Packet size from the environment, so the cost of cutting frames into six
+// times as many packets can be measured rather than assumed.
+let mtuPayload = ProcessInfo.processInfo.environment["LS_MTU_PAYLOAD"]
+    .flatMap(Int.init) ?? Int(LS_DEFAULT_MTU_PAYLOAD)
+let packetizer = RTPPacketizer(sender: sender, mtuPayload: mtuPayload)
 
 var emitted = 0
 let done = DispatchSemaphore(value: 0)

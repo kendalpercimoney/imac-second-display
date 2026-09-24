@@ -116,6 +116,7 @@
         @"controlPort" : @(LS_DEFAULT_CONTROL_PORT),
         @"audioPort"   : @(LS_DEFAULT_AUDIO_PORT),
         @"audio"       : @YES,
+        @"maxDraws"    : @0,
         @"windowed"    : @NO,
         @"vsync"       : @NO,
         @"stats"       : @NO,
@@ -173,6 +174,17 @@
 
     _glView = [[LSGLView alloc] initWithFrame:[[_window contentView] bounds]];
     [_glView setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+
+    // Cap drawing at what the panel can actually show. The pointer arrives at
+    // 120 Hz and every arrival marks the view dirty, so without this the client
+    // redraws 1080p twice as often as a 60 Hz iMac can display it.
+    // -maxDraws overrides the detected rate. It exists because the machine this
+    // is developed on is a 120 Hz panel and the machine it runs on is 60, so
+    // the saving is invisible here without it.
+    double cap = (double)[[NSUserDefaults standardUserDefaults] integerForKey:@"maxDraws"];
+    if (cap <= 0) cap = [self displayRefreshRate];
+    [_glView setMaximumDrawsPerSecond:cap];
+    NSLog(@"[LanScreen] drawing capped at %.0f per second", cap);
     _glView.vsyncEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"vsync"];
     [[_window contentView] addSubview:_glView];
 
@@ -180,6 +192,26 @@
 
     [_window makeKeyAndOrderFront:nil];
     [_window makeFirstResponder:_window];
+}
+
+/// What the screen the window is on actually refreshes at. Falls back to 60,
+/// which is what the panel this was written for does, and which is a safe floor
+/// for anything else: a faster screen just gets its cap raised by whatever this
+/// returns instead.
+- (double)displayRefreshRate {
+    NSScreen *screen = [_window screen] ?: [NSScreen mainScreen];
+    NSNumber *number = [[screen deviceDescription] objectForKey:@"NSScreenNumber"];
+    if (number) {
+        CGDirectDisplayID display = (CGDirectDisplayID)[number unsignedIntValue];
+        CGDisplayModeRef mode = CGDisplayCopyDisplayMode(display);
+        if (mode) {
+            double rate = CGDisplayModeGetRefreshRate(mode);
+            CGDisplayModeRelease(mode);
+            // A built-in panel often reports zero rather than its real rate.
+            if (rate > 1.0) return rate;
+        }
+    }
+    return 60.0;
 }
 
 - (void)buildOverlay {
@@ -371,6 +403,9 @@
 #pragma mark - periodic
 
 - (void)tick:(NSTimer *)timer {
+    // Two seconds of quiet is well past any gap in real audio, and the queue
+    // comes back on its own the moment a packet arrives.
+    [_audioPlayer pauseIfIdleFor:2.0];
     uint64_t bytes = [_receiver bytesReceived];
     uint64_t delta = bytes >= _bytesAtLastTick ? bytes - _bytesAtLastTick : 0;
     _bytesAtLastTick = bytes;

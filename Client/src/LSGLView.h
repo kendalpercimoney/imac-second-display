@@ -48,6 +48,11 @@
                  width:(int)width height:(int)height
               hotspotX:(int)hotspotX hotspotY:(int)hotspotY;
 
+/// Never draw more often than this. The pointer arrives at 120 Hz and marks
+/// the view dirty each time; on a 60 Hz panel half of those draws are of a
+/// frame nobody sees. Zero removes the limit.
+- (void)setMaximumDrawsPerSecond:(double)rate;
+
 /// 0 = present as soon as the frame is ready (tearing, lowest latency).
 /// 1 = wait for vertical blank (clean, adds up to one refresh of latency).
 @property (nonatomic, assign) BOOL vsyncEnabled;

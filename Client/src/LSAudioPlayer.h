@@ -53,6 +53,12 @@
 /// the samples themselves.
 @property (nonatomic, assign) float volume;
 
+/// Pauses the audio queue when nothing has arrived for this long, and it
+/// resumes on its own when audio returns. An audio queue asks for a buffer a
+/// hundred times a second whether or not there is anything to put in it.
+- (void)pauseIfIdleFor:(NSTimeInterval)seconds;
+@property (nonatomic, readonly) BOOL isPlaying;
+
 @property (nonatomic, readonly) uint32_t framesPlayed;
 /// Times the queue asked for audio and there was none: the number that says
 /// whether the buffer is deep enough.

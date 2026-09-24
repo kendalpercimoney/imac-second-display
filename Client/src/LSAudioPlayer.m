@@ -71,6 +71,13 @@
     /// and a discontinuity is exactly what a click is.
     int16_t  _lastSample[8];
     BOOL     _inSilence;
+
+    /// An audio queue does not idle. It asks for a buffer a hundred times a
+    /// second whether or not anything is arriving, and filling those with
+    /// silence measured at a few per cent of a core, continuously, for nothing.
+    /// So it is paused when the host goes quiet and resumed when audio returns.
+    BOOL             _queueRunning;
+    NSTimeInterval   _lastArrival;
 }
 
 - (id)initWithSampleRate:(uint32_t)sampleRate channels:(uint32_t)channels {
@@ -150,6 +157,8 @@ static void LSAudioCallback(void *userData, AudioQueueRef queue, AudioQueueBuffe
     }
 
     _running = YES;
+    _queueRunning = YES;
+    _lastArrival = [NSDate timeIntervalSinceReferenceDate];
     status = AudioQueueStart(_queue, NULL);
     if (status != noErr) {
         if (error) *error = [NSError errorWithDomain:@"LanScreen.Audio" code:status userInfo:
@@ -183,6 +192,13 @@ static void LSAudioCallback(void *userData, AudioQueueRef queue, AudioQueueBuffe
 - (void)enqueueSamples:(const int16_t *)samples frames:(uint32_t)frames {
     if (!samples || frames == 0 || !_ring) return;
     uint32_t count = frames * _channels;
+
+    _lastArrival = [NSDate timeIntervalSinceReferenceDate];
+    if (_running && !_queueRunning && _queue) {
+        // Audio is back. Safe from the receive thread; AudioQueueStart does not
+        // require the thread that created the queue.
+        if (AudioQueueStart(_queue, NULL) == noErr) _queueRunning = YES;
+    }
 
     pthread_mutex_lock(&_lock);
 
@@ -311,6 +327,25 @@ static void LSAudioCallback(void *userData, AudioQueueRef queue, AudioQueueBuffe
 + (double)hardwareFloorMilliseconds {
     return LS_AQ_BUFFERS * LS_AQ_BUFFER_MS;
 }
+
+/// Called once a second by the app. Pauses the queue when the host has gone
+/// quiet, which is most of the time on a desktop that is not playing anything.
+- (void)pauseIfIdleFor:(NSTimeInterval)seconds {
+    if (!_running || !_queueRunning || !_queue) return;
+    if ([NSDate timeIntervalSinceReferenceDate] - _lastArrival < seconds) return;
+
+    AudioQueuePause(_queue);
+    _queueRunning = NO;
+    // Whatever is left is older than the silence that followed it, so playing
+    // it when audio resumes would be playing the past.
+    pthread_mutex_lock(&_lock);
+    _readIndex = _writeIndex = _fill = 0;
+    _inSilence = YES;
+    memset(_lastSample, 0, sizeof(_lastSample));
+    pthread_mutex_unlock(&_lock);
+}
+
+- (BOOL)isPlaying { return _queueRunning; }
 
 - (double)bufferedMilliseconds {
     pthread_mutex_lock(&_lock);

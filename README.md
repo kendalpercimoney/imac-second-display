@@ -157,6 +157,58 @@ value has its own test, because a negative number travelling through an unsigned
 field is precisely the kind of thing that works for positive values and silently
 does not for negative ones; that one was confirmed by masking the sign bit off.
 
+### Why the iMac was getting hot
+
+Two things, both measured on the client under a fixed video load by reading the
+process's own CPU time rather than by watching a fan.
+
+**An idle audio queue is not idle.** It asks for a buffer a hundred times a
+second whether or not anything is arriving, and fills each one with silence. On
+an M1 that measured 0.24 seconds of CPU per 10 seconds — 2.4 per cent of a core,
+continuously, to play nothing — and a 2010 core is several times slower. The
+queue now pauses after two seconds of quiet and resumes the moment a packet
+arrives. Idle cost dropped to 0.05 s per 10 s, five times less.
+
+**Drawing faster than the panel can show.** The pointer arrives 120 times a
+second and every arrival marks the view dirty, so on a 60 Hz iMac half of every
+full-screen redraw was of a frame nobody would ever see. Moving the pointer cost
++76 per cent CPU on top of the video; capping draws at the panel's refresh rate
+takes 20 per cent of that back.
+
+The render thread now waits out the rest of the refresh interval before drawing,
+on the condition variable rather than in a sleep, so everything arriving during
+the wait folds into the same draw and the newest state is still what gets drawn.
+It also made the pointer *more* responsive, not less — the slowest handover
+across four runs went from 3531 µs to 1000 µs, because the render thread spends
+more of its time with the lock released and less of it drawing while holding one.
+
+    ./Tests/run_cursor_test.sh                # uses the panel's real rate
+    MAXDRAWS=60 ./Tests/run_cursor_test.sh    # what the iMac does
+    MAXDRAWS=1000 ./Tests/run_cursor_test.sh  # effectively uncapped
+
+The override exists because this is developed on a 120 Hz panel and runs on a
+60 Hz one, so without it the saving is invisible on the machine doing the
+measuring.
+
+#### Measured and left alone
+
+**No memory leaks.** Resident size is flat across repeated bursts, and `leaks`
+finds nothing rooted in any LanScreen code — the 417 it reports are AppIntents
+and XPC allocations the frameworks make at launch.
+
+**The ring buffer costs 0.078 per cent of a core**, 16 ns a frame, despite
+copying sample by sample with a modulo each time. `Tests/AudioBench` measures it.
+Rewriting it as two memcpys would be faster and would save nothing anyone could
+notice.
+
+**Packet size makes no measurable difference to the client.** Cutting frames
+into six times as many packets, which is what a 1500-byte link forces, cost
+2.02 s against 2.01 s for jumbo frames. That overturns the obvious guess, and it
+is worth saying plainly: syscall overhead on a 2010 machine is higher than on
+the one this was measured on, so this is the least transferable of these
+numbers — but a six-fold change in packet count producing half a per cent here
+does not suggest it dominates there.
+
 ### Why it popped, which was three separate things
 
 A click is a discontinuity. There were three places producing one.
@@ -1192,6 +1244,7 @@ Tests/
   run_render_test.sh     the OpenGL path, checked numerically
   PathMTU/main.swift     link MTU discovery and the payload clamp
   AudioLoop/main.swift   PCM from the host packetiser to the client parser
+  AudioBench/main.m      what the ring buffer costs per second of audio
   SettingsAudit/main.swift  every control either does something or says it does not
   NapCheck/main.swift    whether an app with no window gets throttled
 ```

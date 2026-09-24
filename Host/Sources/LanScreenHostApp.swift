@@ -107,15 +107,14 @@ struct ContentView: View {
                 .disabled(controller.isRunning || !controller.virtualDisplaySupported)
 
                 if settings.source == .virtualDisplay {
-                    Label("Creates a headless display so the iMac becomes a real second "
-                          + "monitor instead of a mirror. Arrange it in System Settings ▸ "
-                          + "Displays once it appears.",
+                    Label("A real second monitor, not a mirror. Arrange it in "
+                          + "System Settings ▸ Displays.",
                           systemImage: "display.2")
                         .font(.caption).foregroundStyle(.secondary)
 
                     if !controller.virtualDisplaySupported {
-                        Label("This macOS does not expose CGVirtualDisplay. Use a hardware "
-                              + "HDMI dummy plug and capture it as an existing display.",
+                        Label("No CGVirtualDisplay on this macOS. Use an HDMI dummy "
+                              + "plug and capture it as an existing display.",
                               systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.orange)
                     }
@@ -196,7 +195,7 @@ struct ContentView: View {
             .disabled(controller.isRunning)
 
             if settings.height > 1080 {
-                Label("Above 1080p the 2010 iMac will likely fall back to software decoding and stutter.",
+                Label("Above 1080p the 2010 iMac falls back to software decoding.",
                       systemImage: "exclamationmark.triangle")
                     .font(.caption).foregroundStyle(.orange).padding(.horizontal, 6)
             }
@@ -208,9 +207,8 @@ struct ContentView: View {
     private var linkMTUNote: some View {
         let mtu = controller.linkMTUBytes
         let fits = controller.effectiveMTUPayload == settings.mtuPayload
-        let text = "The link to \(settings.clientAddress) reports an MTU of \(mtu) B, so the "
-            + "largest packet that does not get split into IP fragments carries "
-            + "\(mtu - lsIPv4UDPOverhead) B."
+        let text = "Link MTU \(mtu) B — up to \(mtu - lsIPv4UDPOverhead) B per packet "
+            + "without IP fragmentation."
         return Text(text)
             .font(.caption)
             .foregroundStyle(fits ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
@@ -235,7 +233,7 @@ struct ContentView: View {
                         Button("Reveal test .sdp") {
                             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
                         }
-                        Text("open with VLC to verify the stream locally")
+                        Text("for VLC")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -247,14 +245,11 @@ struct ContentView: View {
     private var powerSection: some View {
         GroupBox("Power") {
             VStack(alignment: .leading, spacing: 10) {
-                Toggle("Wake the client when streaming starts and when this Mac wakes",
+                Toggle("Wake the client on start, and when this Mac wakes",
                        isOn: $settings.wakeClientAutomatically)
-                Toggle("Keep this Mac at full performance while streaming",
-                       isOn: $settings.preventAppNap)
-                    .help("Opts out of App Nap and timer coalescing. Without it the "
-                          + "picture degrades when you stop moving the cursor, because "
-                          + "macOS treats an unfocused app on an idle system as "
-                          + "something it can throttle.")
+                Toggle("Keep this Mac at full performance", isOn: $settings.preventAppNap)
+                    .help("Opts out of App Nap and timer coalescing, which otherwise "
+                          + "degrade the picture when you stop moving the cursor.")
                 if controller.isRunning {
                     Text(controller.fullPerformanceHeld
                          ? "Full performance asserted — macOS will not throttle this app"
@@ -264,8 +259,8 @@ struct ContentView: View {
                 }
 
                 Toggle("Stop streaming when this Mac sleeps", isOn: $settings.stopOnSleep)
-                    .help("Lets the client drop its keep-awake assertion so the iMac "
-                          + "can sleep too, instead of sitting lit up showing a frozen frame.")
+                    .help("Lets the iMac sleep too, rather than sitting lit up on a "
+                          + "frozen frame.")
 
                 HStack {
                     Text("Client MAC")
@@ -277,15 +272,13 @@ struct ContentView: View {
                         .disabled(settings.clientMACAddress.isEmpty)
                 }
 
-                Label("Filled in automatically the first time the client connects. "
-                      + "macOS hides hardware addresses from apps, so this Mac cannot "
-                      + "look it up on its own — to set it before the first connection, "
-                      + "run `arp -n \(settings.clientAddress)` in Terminal and paste the result.",
+                Label("Learned when the client first connects. macOS hides hardware "
+                      + "addresses from apps, so to set it sooner run "
+                      + "`arp -n \(settings.clientAddress)` and paste the result.",
                       systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary)
 
-                Label("On the iMac, tick Energy Saver ▸ \"Wake for network access\", or the "
-                      + "magic packet will be ignored.",
+                Label("The iMac needs Energy Saver ▸ \"Wake for network access\".",
                       systemImage: "bolt")
                     .font(.caption).foregroundStyle(.secondary)
 
@@ -336,7 +329,7 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Text(String(format: "≈ %.0f ms", latencyEstimate))
                         .font(.system(.body, design: .monospaced).bold())
-                    Text("capture→wire + RTT/2 + decode + render, plus one frame of capture")
+                    Text("capture→wire + RTT/2 + decode + render")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 6).padding(.bottom, 4)
@@ -371,7 +364,7 @@ struct ContentView: View {
 
     private func warningBox(_ items: [String]) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Encoder hints the hardware declined (stream still works):")
+            Text("Encoder hints declined:")
                 .font(.caption).bold()
             ForEach(items, id: \.self) { Text($0).font(.caption.monospaced()) }
         }

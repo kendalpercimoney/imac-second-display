@@ -239,6 +239,27 @@ size_t ls_ctrl_build_volume(uint8_t *dst, size_t cap, uint16_t volume)
     return total;
 }
 
+size_t ls_ctrl_build_audio_delay(uint8_t *dst, size_t cap, int16_t delay_ms)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_AUDIO_DELAY, 2);
+    if (!total) return 0;
+    if (delay_ms < LS_AUDIO_DELAY_MIN_MS) delay_ms = LS_AUDIO_DELAY_MIN_MS;
+    if (delay_ms > LS_AUDIO_DELAY_MAX_MS) delay_ms = LS_AUDIO_DELAY_MAX_MS;
+    /* Two's complement through an unsigned field: both ends are C, and the
+     * cast back on parse is the exact inverse. */
+    put_u16(dst + CTRL_HDR + 0, (uint16_t)delay_ms);
+    return total;
+}
+
+size_t ls_ctrl_build_brightness(uint8_t *dst, size_t cap, uint16_t brightness)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_BRIGHTNESS, 2);
+    if (!total) return 0;
+    if (brightness > LS_BRIGHTNESS_SCALE) brightness = LS_BRIGHTNESS_SCALE;
+    put_u16(dst + CTRL_HDR + 0, brightness);
+    return total;
+}
+
 size_t ls_ctrl_build_cursor_image(uint8_t *dst, size_t cap,
                                   uint16_t image_id,
                                   uint16_t width, uint16_t height,
@@ -294,6 +315,21 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
 
         case LS_MSG_BYE:
         case LS_MSG_KEYFRAME_REQ:
+            return 0;
+
+        case LS_MSG_AUDIO_DELAY: {
+            int16_t delay;
+            if (body < 2) return -1;
+            delay = (int16_t)get_u16(src + CTRL_HDR + 0);
+            if (delay < LS_AUDIO_DELAY_MIN_MS || delay > LS_AUDIO_DELAY_MAX_MS) return -1;
+            out->audio_delay_ms = delay;
+            return 0;
+        }
+
+        case LS_MSG_BRIGHTNESS:
+            if (body < 2) return -1;
+            out->brightness = get_u16(src + CTRL_HDR + 0);
+            if (out->brightness > LS_BRIGHTNESS_SCALE) return -1;
             return 0;
 
         case LS_MSG_VOLUME:

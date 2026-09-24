@@ -301,6 +301,19 @@
                     }
                     break;
 
+                case LS_MSG_AUDIO_DELAY:
+                    if (self.audioDelayChanged) {
+                        self.audioDelayChanged((int)message.audio_delay_ms);
+                    }
+                    break;
+
+                case LS_MSG_BRIGHTNESS:
+                    if (self.brightnessChanged) {
+                        self.brightnessChanged((float)message.brightness /
+                                               (float)LS_BRIGHTNESS_SCALE);
+                    }
+                    break;
+
                 case LS_MSG_BYE:
                     if (self.hostSaidGoodbye) self.hostSaidGoodbye();
                     break;

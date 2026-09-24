@@ -107,6 +107,17 @@ final class StreamSettings: ObservableObject {
     /// the samples.
     @Published var audioVolume: Double { didSet { save(audioVolume, "audioVolume") } }
     @Published var audioPort: Int { didSet { save(audioPort, "audioPort") } }
+    /// Milliseconds to hold audio at the client before playing it, relative to
+    /// its default hold. Negative pulls the sound earlier, which is the
+    /// direction that usually matters: audio takes a shorter path than video
+    /// but sits in a jitter buffer and an audio queue at the far end.
+    @Published var audioDelayMilliseconds: Double {
+        didSet { save(audioDelayMilliseconds, "audioDelayMilliseconds") }
+    }
+    /// The iMac's panel brightness, 0 to 1.
+    @Published var clientBrightness: Double {
+        didSet { save(clientBrightness, "clientBrightness") }
+    }
 
     private let defaults = UserDefaults.standard
     private func save(_ value: Any, _ key: String) { defaults.set(value, forKey: "ls." + key) }
@@ -142,6 +153,8 @@ final class StreamSettings: ObservableObject {
         audioEnabled = d.object(forKey: "ls.audioEnabled") as? Bool ?? false
         audioVolume = d.object(forKey: "ls.audioVolume") as? Double ?? 0.8
         audioPort = int("audioPort", Int(LS_DEFAULT_AUDIO_PORT))
+        audioDelayMilliseconds = dbl("audioDelayMilliseconds", 0)
+        clientBrightness = dbl("clientBrightness", 1.0)
     }
 
     var bitrateBitsPerSecond: Int { Int(bitrateMbps * 1_000_000) }
@@ -149,5 +162,14 @@ final class StreamSettings: ObservableObject {
     /// The volume as the wire carries it: thousandths, clamped to unity.
     var audioVolumeThousandths: UInt16 {
         UInt16(max(0, min(1, audioVolume)) * Double(LS_VOLUME_SCALE))
+    }
+
+    var audioDelayWireValue: Int16 {
+        Int16(max(Double(LS_AUDIO_DELAY_MIN_MS),
+                  min(Double(LS_AUDIO_DELAY_MAX_MS), audioDelayMilliseconds.rounded())))
+    }
+
+    var clientBrightnessThousandths: UInt16 {
+        UInt16(max(0, min(1, clientBrightness)) * Double(LS_BRIGHTNESS_SCALE))
     }
 }

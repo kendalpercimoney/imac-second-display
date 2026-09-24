@@ -15,6 +15,7 @@
 
 import SwiftUI
 import AppKit
+import LSProtocol
 
 // The menu bar is now the app. Everything you touch while streaming — start,
 // stop, the live numbers, the three switches that actually change how it feels —
@@ -44,6 +45,7 @@ struct MenuBarPanel: View {
                 meters
                 linkGroup
                 audioGroup
+                screenGroup
                 switchesGroup
                 if let error = controller.lastError { notice(error, colour: Aero.red) }
                 if !controller.warnings.isEmpty {
@@ -273,7 +275,25 @@ struct MenuBarPanel: View {
                 .opacity(settings.audioEnabled ? 1 : 0.5)
                 // Pushed the moment it changes rather than waiting for the
                 // repeat, so dragging the slider is heard as you drag it.
-                .onChange(of: settings.audioVolume) { _ in controller.sendVolumeNow() }
+                .onChange(of: settings.audioVolume) { _ in controller.sendClientSettingsNow() }
+
+                HStack(spacing: 7) {
+                    Image(systemName: "timer")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Aero.inkFaint)
+                        .frame(width: 14)
+                    Slider(value: $settings.audioDelayMilliseconds,
+                           in: Double(LS_AUDIO_DELAY_MIN_MS)...Double(LS_AUDIO_DELAY_MAX_MS))
+                    Text(String(format: "%+.0f ms", settings.audioDelayMilliseconds))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Aero.ink)
+                        .frame(width: 52, alignment: .trailing)
+                }
+                .disabled(!settings.audioEnabled)
+                .opacity(settings.audioEnabled ? 1 : 0.5)
+                .onChange(of: settings.audioDelayMilliseconds) { _ in
+                    controller.sendClientSettingsNow()
+                }
 
                 if settings.audioEnabled && controller.client.hasSaidHello
                     && !controller.client.playsAudio {
@@ -282,6 +302,26 @@ struct MenuBarPanel: View {
                         .foregroundStyle(Aero.red)
                 }
             }
+        }
+    }
+
+    // MARK: - The iMac's screen
+
+    private var screenGroup: some View {
+        Aero.Group(title: "iMac screen", accent: Aero.amber) {
+            HStack(spacing: 7) {
+                Image(systemName: settings.clientBrightness < 0.01
+                      ? "sun.min" : "sun.max.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Aero.inkFaint)
+                    .frame(width: 14)
+                Slider(value: $settings.clientBrightness, in: 0...1)
+                Text("\(Int(settings.clientBrightness * 100))%")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Aero.ink)
+                    .frame(width: 36, alignment: .trailing)
+            }
+            .onChange(of: settings.clientBrightness) { _ in controller.sendClientSettingsNow() }
         }
     }
 

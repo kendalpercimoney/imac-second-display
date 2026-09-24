@@ -35,6 +35,15 @@
 /// receive thread; never blocks on the audio hardware.
 - (void)enqueueSamples:(const int16_t *)samples frames:(uint32_t)frames;
 
+/// How much audio the ring holds back at all times, which is the delay every
+/// sample goes through. Zero plays each packet the instant it arrives.
+- (void)setTargetBufferMilliseconds:(double)milliseconds;
+- (double)targetBufferMilliseconds;
+
+/// What the audio queue holds on top of that, and therefore the floor: audio
+/// already given to the hardware cannot be pulled back.
++ (double)hardwareFloorMilliseconds;
+
 /// Takes up to `wanted` samples out of the ring, padding with silence if there
 /// are not enough. Called by the audio callback; exposed so the buffering can
 /// be tested without audio hardware, which a headless test has none of.

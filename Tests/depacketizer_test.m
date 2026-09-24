@@ -554,11 +554,12 @@ static void testAudioPackets(void) {
 }
 
 static void testAudioRing(void) {
-    printf("audio ring buffer\n");
-    // 48 kHz stereo, so 96 samples is a millisecond.
+    printf("audio ring buffer and delay line\n");
+    // 48 kHz stereo, so one millisecond is 96 samples.
     LSAudioPlayer *player = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [player setTargetBufferMilliseconds:0];
 
-    int16_t out[4096];
+    int16_t out[8192];
     // Nothing has arrived, so a drain must produce silence rather than noise
     // and must not claim to have played anything.
     memset(out, 0xAB, sizeof(out));
@@ -568,49 +569,121 @@ static void testAudioRing(void) {
     CHECK(silent, "an empty ring did not produce silence");
     CHECK([player framesPlayed] == 0, "an empty ring claimed to have played frames");
 
-    // Below the priming threshold nothing should come out yet: starting early
-    // just means running dry again immediately.
+    // With no delay asked for, audio is playable the moment it lands.
     int16_t ramp[8192];
-    for (int i = 0; i < 8192; i++) ramp[i] = (int16_t)(i - 4096);
-    [player enqueueSamples:ramp frames:100];          // 100 frames = 2.08 ms
-    memset(out, 0xAB, sizeof(out));
-    [player drainInto:out samples:64];
-    silent = 1;
-    for (int i = 0; i < 64; i++) if (out[i] != 0) { silent = 0; break; }
-    CHECK(silent, "the ring played before it was primed");
-
-    // Past the threshold (25 ms = 2400 frames) it should hand back exactly what
-    // went in, in order.
-    [player enqueueSamples:ramp + 200 frames:2400];
-    [player drainInto:out samples:200];
+    for (int i = 0; i < 8192; i++) ramp[i] = (int16_t)(i + 1);
+    [player enqueueSamples:ramp frames:128];       // 256 samples
+    [player drainInto:out samples:256];
     int ordered = 1;
-    for (int i = 0; i < 200; i++) if (out[i] != ramp[i]) { ordered = 0; break; }
-    CHECK(ordered, "the ring did not return the samples that went in, in order");
+    for (int i = 0; i < 256; i++) if (out[i] != ramp[i]) { ordered = 0; break; }
+    CHECK(ordered, "with no delay the ring did not return what went in, in order");
 
-    // Overrun: push far more than the 200 ms ring holds and the oldest audio
-    // must be the part that goes, not the newest.
+    // The delay line proper: with a 10 ms target (960 samples) exactly that
+    // much must stay behind, and only what is in excess of it comes out.
+    LSAudioPlayer *delayed = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [delayed setTargetBufferMilliseconds:10];
+    CHECK([delayed targetBufferMilliseconds] > 9.9 && [delayed targetBufferMilliseconds] < 10.1,
+          "the target was not what was asked for");
+
+    [delayed enqueueSamples:ramp frames:480];      // exactly 960 samples = 10 ms
+    memset(out, 0xAB, sizeof(out));
+    [delayed drainInto:out samples:256];
+    silent = 1;
+    for (int i = 0; i < 256; i++) if (out[i] != 0) { silent = 0; break; }
+    CHECK(silent, "the delay line played audio it was supposed to be holding");
+
+    // One millisecond more, and exactly one millisecond becomes playable.
+    [delayed enqueueSamples:ramp + 960 frames:48]; // 96 samples
+    memset(out, 0xAB, sizeof(out));
+    [delayed drainInto:out samples:256];
+    int playedCount = 0;
+    for (int i = 0; i < 256; i++) if (out[i] != 0) playedCount++;
+    CHECK(playedCount == 96, "the delay line released %d samples, not 96", playedCount);
+    // And what came out is the OLDEST audio, not the newest: a delay line is
+    // first in, first out, otherwise it is just a reordering bug.
+    CHECK(out[0] == ramp[0], "the delay line released the newest audio first");
+
+    // Overrun: push far more than the ring holds and the oldest audio is what
+    // goes, because what has just arrived is what the screen is showing now.
     LSAudioPlayer *small = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [small setTargetBufferMilliseconds:0];
+    // Each block is stamped with its round number. Kept small deliberately:
+    // these are int16 samples, and a marker that overflows wraps negative and
+    // makes a late round look like an early one, which is how the first
+    // version of this check failed against correct code.
     for (int round = 0; round < 40; round++) {
         int16_t block[2048];
-        for (int i = 0; i < 2048; i++) block[i] = (int16_t)(round * 1000 + i);
+        for (int i = 0; i < 2048; i++) block[i] = (int16_t)(round * 500 + 1);
         [small enqueueSamples:block frames:1024];
     }
     CHECK([small overruns] > 0, "overflowing the ring did not count an overrun");
     [small drainInto:out samples:64];
-    CHECK(out[0] != 0 || out[1] != 0, "after an overrun the ring returned silence");
-    // What survives must be from the later rounds, not the first.
-    CHECK(out[0] >= 1000, "an overrun dropped the newest audio instead of the oldest");
+    CHECK(out[0] != 0, "after an overrun the ring returned silence");
+    // The ring holds 400 ms of a stream far longer than that, so what survives
+    // must come from the later rounds -- anything under round ten would mean
+    // the newest audio was the part thrown away.
+    CHECK(out[0] > 5000, "an overrun dropped the newest audio instead of the oldest (%d)",
+          (int)out[0]);
 
-    // Underrun: keep draining past what is there, and the shortfall is silence.
-    // The first drain is satisfied in full; the second is not.
+    // Underrun: keep draining past what is there and the shortfall is silence.
     uint32_t before = [player underruns];
-    [player drainInto:out samples:4096];
-    CHECK([player underruns] == before, "a drain that was satisfied counted an underrun");
     [player drainInto:out samples:4096];
     CHECK([player underruns] == before + 1, "running dry did not count an underrun");
     int tailSilent = 1;
-    for (int i = 1000; i < 4096; i++) if (out[i] != 0) { tailSilent = 0; break; }
+    for (int i = 0; i < 4096; i++) if (out[i] != 0) { tailSilent = 0; break; }
     CHECK(tailSilent, "the shortfall was not padded with silence");
+}
+
+static void testAudioDelayAndBrightness(void) {
+    printf("audio delay and brightness messages\n");
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+
+    // Negative is the direction that matters here, so it is the first thing
+    // checked: a signed value travelling through an unsigned field is exactly
+    // the sort of thing that works for positive numbers and silently does not
+    // for negative ones.
+    size_t n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), -40);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "negative delay did not parse");
+    CHECK(message.type == LS_MSG_AUDIO_DELAY && message.audio_delay_ms == -40,
+          "negative delay did not round trip");
+
+    n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), 0);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 && message.audio_delay_ms == 0,
+          "zero delay did not round trip");
+
+    n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), 175);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 && message.audio_delay_ms == 175,
+          "positive delay did not round trip");
+
+    // Both ends of the range clamp when built.
+    n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), -3000);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 &&
+          message.audio_delay_ms == LS_AUDIO_DELAY_MIN_MS, "delay did not clamp low");
+    n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), 3000);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 &&
+          message.audio_delay_ms == LS_AUDIO_DELAY_MAX_MS, "delay did not clamp high");
+
+    // And an out-of-range value arriving from elsewhere is refused rather than
+    // clamped: nothing we build can produce it, so it is a corrupt packet.
+    n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), 100);
+    buffer[8] = 0x7F; buffer[9] = 0xFF;      /* 32767 ms */
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "an absurd delay was accepted");
+
+    printf("brightness\n");
+    n = ls_ctrl_build_brightness(buffer, sizeof(buffer), 250);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "brightness did not parse");
+    CHECK(message.type == LS_MSG_BRIGHTNESS && message.brightness == 250,
+          "brightness did not round trip");
+    n = ls_ctrl_build_brightness(buffer, sizeof(buffer), 0);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 && message.brightness == 0,
+          "a dark screen did not round trip");
+    n = ls_ctrl_build_brightness(buffer, sizeof(buffer), 9000);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 &&
+          message.brightness == LS_BRIGHTNESS_SCALE, "brightness did not clamp");
+    n = ls_ctrl_build_brightness(buffer, sizeof(buffer), 500);
+    buffer[8] = 0xFF; buffer[9] = 0xFF;
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "an over-range brightness was accepted");
 }
 
 int main(void) {
@@ -625,6 +698,7 @@ int main(void) {
         testVolumeMessages();
         testAudioPackets();
         testAudioRing();
+        testAudioDelayAndBrightness();
 
         if (gFailures == 0) {
             printf("\nAll depacketizer tests passed.\n");

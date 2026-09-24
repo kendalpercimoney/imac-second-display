@@ -21,13 +21,17 @@
 // machine this old; more and you are just adding delay. The ring behind them
 // holds 200 ms, which is not a target depth -- it is headroom so a burst is
 // absorbed rather than dropped.
+// Three buffers of 5 ms rather than 10. These are the hardware floor: nothing
+// the delay control does can pull audio earlier than what is already sitting in
+// the audio queue, so the smaller they are the further negative the slider can
+// usefully go. 15 ms total, against the 30 it was.
 #define LS_AQ_BUFFERS        3
-#define LS_AQ_BUFFER_MS      10
-#define LS_RING_MS           200
-// Start playing once this much has arrived. Below about 20 ms every hiccup in
-// the network is audible; much above it and you can hear the lag against the
-// picture.
-#define LS_PRIME_MS          25
+#define LS_AQ_BUFFER_MS      5
+#define LS_RING_MS           400
+// The ring holds this much back at all times, which is what makes it a delay
+// line rather than just somewhere packets land. Below about 20 ms every network
+// hiccup is audible; above it you start hearing the lag against the picture.
+#define LS_DEFAULT_TARGET_MS 25
 
 @implementation LSAudioPlayer {
     AudioQueueRef       _queue;
@@ -47,8 +51,9 @@
     pthread_mutex_t _lock;
 
     BOOL     _running;
-    BOOL     _primed;
-    uint32_t _primeSamples;
+    /// How much audio the ring keeps behind at all times. Each sample waits
+    /// this long before it is played, so this *is* the delay.
+    uint32_t _targetSamples;
 }
 
 - (id)initWithSampleRate:(uint32_t)sampleRate channels:(uint32_t)channels {
@@ -60,7 +65,7 @@
 
     _ringSamples = (uint32_t)((uint64_t)_sampleRate * _channels * LS_RING_MS / 1000);
     _ring = (int16_t *)calloc(_ringSamples, sizeof(int16_t));
-    _primeSamples = (uint32_t)((uint64_t)_sampleRate * _channels * LS_PRIME_MS / 1000);
+    [self setTargetBufferMilliseconds:LS_DEFAULT_TARGET_MS];
     return self;
 }
 
@@ -153,7 +158,6 @@ static void LSAudioCallback(void *userData, AudioQueueRef queue, AudioQueueBuffe
     }
     pthread_mutex_lock(&_lock);
     _readIndex = _writeIndex = _fill = 0;
-    _primed = NO;
     pthread_mutex_unlock(&_lock);
 }
 
@@ -179,7 +183,6 @@ static void LSAudioCallback(void *userData, AudioQueueRef queue, AudioQueueBuffe
         _writeIndex = (_writeIndex + 1) % _ringSamples;
     }
     _fill += count;
-    if (!_primed && _fill >= _primeSamples) _primed = YES;
     pthread_mutex_unlock(&_lock);
 }
 
@@ -187,8 +190,12 @@ static void LSAudioCallback(void *userData, AudioQueueRef queue, AudioQueueBuffe
 /// nothing: a short read is silence, not an error.
 - (void)drainInto:(int16_t *)out samples:(uint32_t)wanted {
     pthread_mutex_lock(&_lock);
-    uint32_t available = _primed ? _fill : 0;
-    uint32_t take = available < wanted ? available : wanted;
+    // Only what is in excess of the target may be played. Holding that much
+    // back at all times is what delays every sample by the same amount, and it
+    // is also what absorbs a late packet without a gap. A target of zero plays
+    // audio the instant it arrives.
+    uint32_t playable = (_fill > _targetSamples) ? (_fill - _targetSamples) : 0;
+    uint32_t take = playable < wanted ? playable : wanted;
     for (uint32_t i = 0; i < take; i++) {
         out[i] = _ring[_readIndex];
         _readIndex = (_readIndex + 1) % _ringSamples;
@@ -196,12 +203,35 @@ static void LSAudioCallback(void *userData, AudioQueueRef queue, AudioQueueBuffe
     _fill -= take;
     if (take < wanted) {
         memset(out + take, 0, (wanted - take) * sizeof(int16_t));
-        // Running dry means re-priming, otherwise every subsequent callback
-        // stutters against a buffer that never gets a chance to refill.
-        if (_primed) { _underruns++; _primed = NO; }
+        _underruns++;
     }
     _framesPlayed += take / _channels;
     pthread_mutex_unlock(&_lock);
+}
+
+- (void)setTargetBufferMilliseconds:(double)milliseconds {
+    if (milliseconds < 0) milliseconds = 0;
+    // It has to fit, with room to actually hold audio in front of it.
+    double ceiling = (double)LS_RING_MS * 0.75;
+    if (milliseconds > ceiling) milliseconds = ceiling;
+    uint32_t samples = (uint32_t)(milliseconds / 1000.0 * (double)_sampleRate * (double)_channels);
+    pthread_mutex_lock(&_lock);
+    _targetSamples = samples;
+    pthread_mutex_unlock(&_lock);
+}
+
+- (double)targetBufferMilliseconds {
+    pthread_mutex_lock(&_lock);
+    uint32_t samples = _targetSamples;
+    pthread_mutex_unlock(&_lock);
+    if (_sampleRate == 0 || _channels == 0) return 0;
+    return (double)samples / (double)_channels / (double)_sampleRate * 1000.0;
+}
+
+/// What the audio queue itself holds, which is the floor the delay control
+/// cannot get under: audio already handed to the hardware cannot be un-handed.
++ (double)hardwareFloorMilliseconds {
+    return LS_AQ_BUFFERS * LS_AQ_BUFFER_MS;
 }
 
 - (double)bufferedMilliseconds {

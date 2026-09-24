@@ -22,6 +22,7 @@
 #import "LSPowerManager.h"
 #import "LSAudioPlayer.h"
 #import "LSAudioReceiver.h"
+#import "LSBrightness.h"
 
 @implementation LSWindow
 - (BOOL)canBecomeKeyWindow { return YES; }
@@ -60,6 +61,7 @@
     BOOL      _audioEnabled;
     LSAudioPlayer   *_audioPlayer;
     LSAudioReceiver *_audioReceiver;
+    LSBrightness    *_brightness;
     BOOL      _fullscreen;
     BOOL      _statsVisible;
 
@@ -269,7 +271,23 @@
         _control = nil;
     } else {
         __unsafe_unretained LSAppDelegate *weakSelf = self;
+        _brightness = [[LSBrightness alloc] init];
+        if (!_brightness.available) {
+            NSLog(@"[LanScreen] brightness control unavailable: %@", _brightness.statusMessage);
+        }
+        LSBrightness *brightness = _brightness;
+        _control.brightnessChanged = ^(float value) {
+            [brightness setBrightness:value];
+        };
+
         LSAudioPlayer *player = _audioPlayer;
+        _control.audioDelayChanged = ^(int delayMilliseconds) {
+            // The host's slider is relative to the default hold, so a negative
+            // value shortens it. It cannot go below zero -- the audio queue's
+            // own buffers are the floor beneath that.
+            double target = 25.0 + (double)delayMilliseconds;
+            [player setTargetBufferMilliseconds:target < 0 ? 0 : target];
+        };
         _control.volumeChanged = ^(float volume) {
             // Arrives on the control thread. AudioQueueSetParameter is safe
             // there, so this does not need a hop to main.
@@ -474,9 +492,18 @@
             _glView.vsyncEnabled ? @"on" : @"off"];
         [text appendFormat:@"pointer updates %u\n", [_control cursorMessagesReceived]];
         if (_audioPlayer) {
-            [text appendFormat:@"audio %5.1f ms buffered   under %u   over %u   vol %3.0f%%\n",
-                [_audioPlayer bufferedMilliseconds], [_audioPlayer underruns],
-                [_audioPlayer overruns], [_audioPlayer volume] * 100.0f];
+            [text appendFormat:@"audio %5.1f ms buffered (hold %4.1f + %4.1f hw)   "
+                               @"under %u   over %u   vol %3.0f%%\n",
+                [_audioPlayer bufferedMilliseconds], [_audioPlayer targetBufferMilliseconds],
+                [LSAudioPlayer hardwareFloorMilliseconds],
+                [_audioPlayer underruns], [_audioPlayer overruns],
+                [_audioPlayer volume] * 100.0f];
+            if (_brightness) {
+                [text appendFormat:@"brightness %@\n",
+                    _brightness.available
+                        ? [NSString stringWithFormat:@"%3.0f%%", [_brightness currentBrightness] * 100.0f]
+                        : _brightness.statusMessage];
+            }
         } else if (_audioEnabled) {
             [text appendString:@"audio: not available\n"];
         }
@@ -591,6 +618,7 @@
     [_receiver stop];
     [_audioReceiver stop];
     [_audioPlayer stop];
+    [_brightness restoreOriginal];
     [_control stop];
     [_decoder stop];
     [NSApp setPresentationOptions:NSApplicationPresentationDefault];

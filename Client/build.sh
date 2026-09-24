@@ -135,6 +135,7 @@ SOURCES=(
     "$ROOT/Client/src/LSPowerManager.m"
     "$ROOT/Client/src/LSAudioPlayer.m"
     "$ROOT/Client/src/LSAudioReceiver.m"
+    "$ROOT/Client/src/LSBrightness.m"
 )
 
 # -fobjc-arc is fine on 10.9; weak references need 10.7+ and we are well past.

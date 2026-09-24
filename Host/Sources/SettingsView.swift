@@ -51,6 +51,7 @@ struct SettingsView: View {
                 videoSection
                 networkSection
                 audioSection
+                clientScreenSection
                 latencySection
                 powerSection
                 statsSection
@@ -306,7 +307,25 @@ struct SettingsView: View {
                         .monospacedDigit().frame(width: 44, alignment: .trailing)
                 }
                 .disabled(!settings.audioEnabled)
-                .onChange(of: settings.audioVolume) { _ in controller.sendVolumeNow() }
+                .onChange(of: settings.audioVolume) { _ in controller.sendClientSettingsNow() }
+
+                HStack {
+                    Text("Delay")
+                    Slider(value: $settings.audioDelayMilliseconds,
+                           in: Double(LS_AUDIO_DELAY_MIN_MS)...Double(LS_AUDIO_DELAY_MAX_MS))
+                    Text(String(format: "%+.0f ms", settings.audioDelayMilliseconds))
+                        .monospacedDigit().frame(width: 60, alignment: .trailing)
+                }
+                .disabled(!settings.audioEnabled)
+                .onChange(of: settings.audioDelayMilliseconds) { _ in
+                    controller.sendClientSettingsNow()
+                }
+                Text("Negative pulls the sound earlier, which is usually the direction "
+                     + "you want: audio takes a shorter path than video but waits in a "
+                     + "buffer at the far end. It cannot go below what the client's audio "
+                     + "queue already holds.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 HStack {
                     Text("Audio port")
@@ -316,6 +335,27 @@ struct SettingsView: View {
                 }
 
                 inertNote("Send audio")
+            }
+            .padding(6)
+        }
+    }
+
+    private var clientScreenSection: some View {
+        GroupBox("iMac screen") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Brightness")
+                    Slider(value: $settings.clientBrightness, in: 0...1)
+                    Text("\(Int(settings.clientBrightness * 100))%")
+                        .monospacedDigit().frame(width: 44, alignment: .trailing)
+                }
+                .onChange(of: settings.clientBrightness) { _ in
+                    controller.sendClientSettingsNow()
+                }
+                Text("Set on the iMac's own panel. A display that does not expose "
+                     + "brightness ignores it, and the client says so in its overlay.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(6)
         }

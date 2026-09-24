@@ -45,6 +45,13 @@
 /// so a lost one heals itself.
 @property (nonatomic, copy) void (^volumeChanged)(float volume);
 
+/// How long to hold audio before playing it, in milliseconds. Negative means
+/// hold less than the default, which pulls the sound earlier.
+@property (nonatomic, copy) void (^audioDelayChanged)(int delayMilliseconds);
+
+/// Panel brightness the host wants, 0 to 1.
+@property (nonatomic, copy) void (^brightnessChanged)(float brightness);
+
 @property (nonatomic, copy) void (^hostSaidGoodbye)(void);
 
 /// The pointer, sent separately from the video so it is not a whole

@@ -185,12 +185,33 @@ enum {
     LS_MSG_CURSOR_IMAGE = 8,  /* host -> client: what it looks like           */
     /* Playback volume for the client, because the slider is on the host and
      * the speakers are not. Resent periodically so a lost one heals itself. */
-    LS_MSG_VOLUME       = 9
+    LS_MSG_VOLUME       = 9,
+    /* How long the client should hold audio before playing it. Negative pulls
+     * it earlier, which is the direction that usually matters: audio takes a
+     * shorter path than video but sits in a jitter buffer and an audio queue at
+     * the far end, so it tends to arrive late rather than early. */
+    LS_MSG_AUDIO_DELAY  = 10,
+    /* The iMac's panel brightness. The screen is over there; the slider is not. */
+    LS_MSG_BRIGHTNESS   = 11
 };
 
 /* Volume is carried as thousandths, so 1000 is unity and 0 is silence. An
  * integer keeps it exact across the wire and across both languages. */
 #define LS_VOLUME_SCALE     1000u
+
+/* Audio delay in milliseconds, signed. The range is what a person can usefully
+ * drag; the client clamps whatever it is actually able to do on top of that,
+ * because it cannot buffer less than nothing.
+ *
+ * An enum rather than #define so both ends get a real symbol rather than a
+ * textual substitution, which matters for the one value here that is signed. */
+enum {
+    LS_AUDIO_DELAY_MIN_MS = -50,
+    LS_AUDIO_DELAY_MAX_MS = 250
+};
+
+/* Brightness in thousandths, like volume. */
+#define LS_BRIGHTNESS_SCALE 1000u
 
 /* Flags a client sets in its HELLO. */
 /* It can draw the pointer itself, so the host may leave it out of the video.
@@ -249,6 +270,10 @@ typedef struct {
 
     /* VOLUME: thousandths, 0 to LS_VOLUME_SCALE. */
     uint16_t volume;
+    /* AUDIO_DELAY: milliseconds, signed. */
+    int16_t  audio_delay_ms;
+    /* BRIGHTNESS: thousandths, 0 to LS_BRIGHTNESS_SCALE. */
+    uint16_t brightness;
 } ls_ctrl_message;
 
 /* Each builder returns the number of bytes written, or 0 if cap was too small.
@@ -271,6 +296,12 @@ size_t ls_ctrl_build_cursor(uint8_t *dst, size_t cap,
 
 /* Clamped to LS_VOLUME_SCALE, so a caller cannot ask for amplification. */
 size_t ls_ctrl_build_volume(uint8_t *dst, size_t cap, uint16_t volume);
+
+/* Clamped to the range above. */
+size_t ls_ctrl_build_audio_delay(uint8_t *dst, size_t cap, int16_t delay_ms);
+
+/* Clamped to LS_BRIGHTNESS_SCALE. */
+size_t ls_ctrl_build_brightness(uint8_t *dst, size_t cap, uint16_t brightness);
 
 /* `cap` must be at least LS_CTRL_MAX_PACKET. Returns 0 if the bitmap is larger
  * than LS_CURSOR_MAX_IMAGE_BYTES. */

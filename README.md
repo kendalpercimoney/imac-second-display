@@ -498,6 +498,27 @@ machines you own avoids the argument.
 **Or a USB stick.** Copy the `Common`, `Client` folders and `README.md` — that
 is all the iMac needs.
 
+
+### Getting the built client back
+
+There is no scp in either direction. To bring the app the iMac just built back
+to this Mac, serve it from the iMac — in the directory that contains
+`LanScreenClient.app`:
+
+```bash
+python -m SimpleHTTPServer 8000
+```
+
+and pull it here:
+
+```bash
+./Tools/fetch_from_imac.sh
+```
+
+It checks what arrived: an x86_64 Mach-O with a 10.x deployment target, and not
+the same bytes that are already in `build/`. A 404 page saved under the right
+filename looks fine until someone runs it on the iMac.
+
 ### Build
 
 ```bash

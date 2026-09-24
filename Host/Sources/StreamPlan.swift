@@ -66,6 +66,11 @@ struct StreamPlan: Equatable {
     // pointer
     var forwardsCursorSeparately: Bool
 
+    // audio
+    var sendsAudio: Bool
+    var audioPort: Int
+    var audioVolumeThousandths: UInt16
+
     // power
     var wakesClient: Bool
     var holdsFullPerformance: Bool
@@ -80,9 +85,13 @@ struct StreamPlan: Equatable {
     /// worth a warning; the rest are not.
     var overrides: [Override] = []
 
-    /// - Parameter linkMTU: what the interface that routes to the client says it
-    ///   can carry, or nil if it could not be determined.
-    init(settings: StreamSettings, linkMTU: Int? = nil) {
+    /// - Parameters:
+    ///   - linkMTU: what the interface that routes to the client says it can
+    ///     carry, or nil if it could not be determined.
+    ///   - clientPlaysAudio: nil until a client has said hello. Audio is only
+    ///     sent to a client that says it can play it — otherwise it is 1.5 Mb/s
+    ///     into a socket nothing is listening to.
+    init(settings: StreamSettings, linkMTU: Int? = nil, clientPlaysAudio: Bool? = nil) {
         width = settings.width
         height = settings.height
         frameRate = settings.frameRate
@@ -97,6 +106,21 @@ struct StreamPlan: Equatable {
         wakesClient = settings.wakeClientAutomatically
         holdsFullPerformance = settings.preventAppNap
         stopsOnSleep = settings.stopOnSleep
+
+        audioPort = settings.audioPort
+        audioVolumeThousandths = settings.audioVolumeThousandths
+        if settings.audioEnabled, clientPlaysAudio == false {
+            sendsAudio = false
+            inert.append(Override(control: "Send audio",
+                                  reason: "this client cannot play it"))
+            overrides.append(Override(control: "Send audio",
+                                      reason: "this client cannot play it"))
+        } else {
+            sendsAudio = settings.audioEnabled
+        }
+        if !sendsAudio {
+            inert.append(Override(control: "Volume", reason: "audio is off"))
+        }
 
         // The pointer must not be in the video as well as being sent beside it,
         // or there are two of them, one lagging the other.

@@ -17,6 +17,8 @@ import Foundation
 import ScreenCaptureKit
 import CoreMedia
 import CoreVideo
+import AudioToolbox
+import LSProtocol
 
 struct DisplayInfo: Identifiable, Hashable {
     let id: UInt32
@@ -32,9 +34,18 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private var stream: SCStream?
     private let outputQueue = DispatchQueue(label: "com.lanscreen.capture", qos: .userInteractive)
+    /// Audio gets its own queue so a slow frame never delays a buffer of sound.
+    /// Ears notice a gap of a few milliseconds; eyes do not notice a frame.
+    private let audioQueue = DispatchQueue(label: "com.lanscreen.capture.audio",
+                                           qos: .userInteractive)
+    /// Reused across callbacks so a buffer of audio costs no allocation.
+    private var interleaveBuffer = [Int16]()
 
     /// Called on outputQueue for every complete frame.
     var onFrame: ((CVPixelBuffer, CMTime) -> Void)?
+    /// Called on audioQueue with interleaved 16-bit samples, when audio capture
+    /// is on. Nil-ing this out does not stop capture; pass capturesAudio: false.
+    var onAudio: ((UnsafePointer<Int16>, Int, Int) -> Void)?
     /// Called if the stream dies on its own (display disconnected, permission
     /// revoked, and so on).
     var onStreamStopped: ((Error) -> Void)?
@@ -48,7 +59,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func start(displayID: UInt32, width: Int, height: Int,
-               frameRate: Int, showsCursor: Bool, useYUV420: Bool = true) async throws {
+               frameRate: Int, showsCursor: Bool, useYUV420: Bool = true,
+               capturesAudio: Bool = false) async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
 
@@ -73,7 +85,15 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         config.pixelFormat = useYUV420 ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
                                        : kCVPixelFormatType_32BGRA
         config.showsCursor = showsCursor
-        config.capturesAudio = false
+        // System audio, straight from ScreenCaptureKit. No virtual audio device
+        // to install, and no extra permission beyond the screen recording grant
+        // the app already needs.
+        config.capturesAudio = capturesAudio
+        if capturesAudio {
+            config.sampleRate = Int(LS_AUDIO_SAMPLE_RATE)
+            config.channelCount = Int(LS_AUDIO_CHANNELS)
+            config.excludesCurrentProcessAudio = true
+        }
         // The frame interval is an upper bound on rate, not a promise: SCK only
         // delivers when something actually changed on screen. A static desktop
         // costs zero bandwidth, which is why StreamController keeps its own
@@ -89,6 +109,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen,
                                    sampleHandlerQueue: outputQueue)
+        if capturesAudio {
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        }
         try await stream.startCapture()
         self.stream = stream
     }
@@ -103,7 +126,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of type: SCStreamOutputType) {
-        guard type == .screen, CMSampleBufferIsValid(sampleBuffer) else { return }
+        guard CMSampleBufferIsValid(sampleBuffer) else { return }
+        if type == .audio {
+            handleAudio(sampleBuffer)
+            return
+        }
+        guard type == .screen else { return }
 
         // SCK also sends .idle and .blank frames with no useful pixels; encoding
         // those would waste bitrate re-sending an unchanged screen.
@@ -116,6 +144,88 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         onFrame?(pixelBuffer, CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+    }
+
+    // MARK: - audio
+
+    /// ScreenCaptureKit hands over 32-bit float, one buffer per channel. The
+    /// wire wants interleaved 16-bit, which is half the bytes and is what the
+    /// 2010 iMac's audio stack wants anyway, so the conversion happens once
+    /// here rather than at either end of the network.
+    private func handleAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard let onAudio else { return }
+        guard let description = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee
+        else { return }
+
+        let frames = Int(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frames > 0 else { return }
+        let channels = Int(asbd.mChannelsPerFrame)
+        guard channels > 0 else { return }
+
+        // Only the float path is implemented, because it is the only thing SCK
+        // produces. Anything else is dropped rather than reinterpreted as
+        // float, which would be loud.
+        guard asbd.mFormatID == kAudioFormatLinearPCM,
+              asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+              asbd.mBitsPerChannel == 32 else { return }
+
+        var blockBuffer: CMBlockBuffer?
+        let listSize = MemoryLayout<AudioBufferList>.size
+            + (max(channels, 1) - 1) * MemoryLayout<AudioBuffer>.size
+        let listMemory = UnsafeMutableRawPointer.allocate(
+            byteCount: listSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { listMemory.deallocate() }
+        let list = listMemory.bindMemory(to: AudioBufferList.self, capacity: 1)
+
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: list,
+            bufferListSize: listSize,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &blockBuffer)
+        guard status == noErr else { return }
+
+        let buffers = UnsafeMutableAudioBufferListPointer(list)
+        let outChannels = min(channels, Int(LS_AUDIO_CHANNELS))
+        if interleaveBuffer.count < frames * outChannels {
+            interleaveBuffer = [Int16](repeating: 0, count: frames * outChannels)
+        }
+
+        interleaveBuffer.withUnsafeMutableBufferPointer { out in
+            guard let out = out.baseAddress else { return }
+            for channel in 0..<outChannels {
+                // Non-interleaved: one AudioBuffer per channel. If a stream ever
+                // arrives interleaved there is one buffer holding everything,
+                // and the stride handles that too.
+                let source: UnsafeMutablePointer<Float>
+                let stride: Int
+                if buffers.count > channel, let data = buffers[channel].mData {
+                    source = data.assumingMemoryBound(to: Float.self)
+                    stride = Int(buffers[channel].mNumberChannels)
+                } else if let data = buffers[0].mData {
+                    source = data.assumingMemoryBound(to: Float.self).advanced(by: channel)
+                    stride = channels
+                } else {
+                    continue
+                }
+                for frame in 0..<frames {
+                    let value = source[frame * stride]
+                    // Clamp before scaling: a sample slightly over 1.0 would
+                    // wrap to full-scale negative, which is an audible click.
+                    let clamped = max(-1.0, min(1.0, value))
+                    out[frame * outChannels + channel] = Int16(clamped * 32767.0)
+                }
+            }
+        }
+
+        interleaveBuffer.withUnsafeBufferPointer { pointer in
+            guard let base = pointer.baseAddress else { return }
+            onAudio(base, frames, outChannels)
+        }
     }
 
     // MARK: - SCStreamDelegate

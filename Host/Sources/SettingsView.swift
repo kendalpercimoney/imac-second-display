@@ -50,6 +50,7 @@ struct SettingsView: View {
                 destinationSection
                 videoSection
                 networkSection
+                audioSection
                 latencySection
                 powerSection
                 statsSection
@@ -286,6 +287,38 @@ struct SettingsView: View {
             .font(.caption)
             .foregroundStyle(fits ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var audioSection: some View {
+        GroupBox("Audio") {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Send this Mac's audio to the client", isOn: $settings.audioEnabled)
+                    .disabled(controller.isRunning)
+                Text("Raw PCM, 48 kHz stereo — 1.5 Mb/s, and no encode or decode "
+                     + "delay of its own.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Text("Volume")
+                    Slider(value: $settings.audioVolume, in: 0...1)
+                    Text("\(Int(settings.audioVolume * 100))%")
+                        .monospacedDigit().frame(width: 44, alignment: .trailing)
+                }
+                .disabled(!settings.audioEnabled)
+                .onChange(of: settings.audioVolume) { _ in controller.sendVolumeNow() }
+
+                HStack {
+                    Text("Audio port")
+                    TextField("", value: $settings.audioPort, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder).frame(width: 70)
+                        .disabled(controller.isRunning)
+                }
+
+                inertNote("Send audio")
+            }
+            .padding(6)
+        }
     }
 
     private var latencySection: some View {

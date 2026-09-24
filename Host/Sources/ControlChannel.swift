@@ -35,6 +35,8 @@ final class ControlChannel {
         var macAddress: String = ""
         /// Whether the client told us it can draw the pointer itself.
         var drawsCursor = false
+        /// Whether the client told us it can play the audio stream.
+        var playsAudio = false
         var hasSaidHello = false
         var lastSeen: Date?
         var rttMilliseconds: Double = 0
@@ -176,6 +178,7 @@ final class ControlChannel {
             state.screenWidth = Int(message.screen_width)
             state.screenHeight = Int(message.screen_height)
             state.drawsCursor = (message.flags & UInt16(LS_CLIENT_FLAG_DRAWS_CURSOR)) != 0
+            state.playsAudio = (message.flags & UInt16(LS_CLIENT_FLAG_PLAYS_AUDIO)) != 0
             state.hasSaidHello = true
             if !reportedMAC.isEmpty { state.macAddress = reportedMAC }
             lock.unlock()

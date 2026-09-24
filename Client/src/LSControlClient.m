@@ -195,11 +195,12 @@
 
 - (void)sendHelloWithWidth:(uint16_t)width height:(uint16_t)height videoPort:(uint16_t)videoPort {
     uint8_t buffer[LS_CTRL_MAX_SIZE];
-    // Tell the host this build draws the pointer itself. A host that forwards
-    // the pointer to a client that cannot draw it would leave no pointer on
-    // screen anywhere.
+    // Tell the host what this build can do. A host that forwards the pointer to
+    // a client that cannot draw it would leave no pointer on screen anywhere,
+    // and one that sends audio to a client that cannot play it would be pouring
+    // 1.5 Mb/s into a socket nobody is listening to.
     size_t n = ls_ctrl_build_hello(buffer, sizeof(buffer), width, height, videoPort,
-                                   LS_CLIENT_FLAG_DRAWS_CURSOR,
+                                   LS_CLIENT_FLAG_DRAWS_CURSOR | LS_CLIENT_FLAG_PLAYS_AUDIO,
                                    _haveLocalMAC ? _localMAC : NULL);
     [self sendBytes:buffer length:n];
 }
@@ -291,6 +292,12 @@
                         self.cursorImageChanged(message.cursor_image_id,
                                                 message.image_width, message.image_height,
                                                 message.hotspot_x, message.hotspot_y, rgba);
+                    }
+                    break;
+
+                case LS_MSG_VOLUME:
+                    if (self.volumeChanged) {
+                        self.volumeChanged((float)message.volume / (float)LS_VOLUME_SCALE);
                     }
                     break;
 

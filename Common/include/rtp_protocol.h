@@ -40,6 +40,7 @@ extern "C" {
 
 #define LS_DEFAULT_VIDEO_PORT     5000   /* host -> client, RTP/H.264       */
 #define LS_DEFAULT_CONTROL_PORT   5001   /* bidirectional control messages  */
+#define LS_DEFAULT_AUDIO_PORT     5002   /* host -> client, raw PCM         */
 
 /* -------------------------------------------------------------------- RTP */
 
@@ -54,6 +55,61 @@ extern "C" {
 #define LS_DEFAULT_MTU_PAYLOAD    1400
 /* For a direct link with jumbo frames enabled on both NICs (MTU 9000). */
 #define LS_JUMBO_MTU_PAYLOAD      8900
+
+/* ------------------------------------------------------------------ audio */
+
+/*
+ * Audio is raw PCM on its own socket, deliberately.
+ *
+ * Not compressed: 48 kHz stereo 16-bit is 1.5 Mb/s, against 25 to 50 for the
+ * video, on a link that has a gigabit to spare. An AAC round trip would add
+ * more algorithmic latency than the entire rest of the pipeline costs, to save
+ * bandwidth that is not scarce.
+ *
+ * Not on the video socket: a lost audio packet must be concealed and forgotten,
+ * never treated the way a lost video packet is, and audio must not queue behind
+ * the burst of packets a keyframe makes.
+ *
+ * The header is network byte order like everything else. The samples are not:
+ * they are little-endian because both machines are, and byte-swapping ninety-six
+ * thousand samples a second on a 2010 CPU would buy nothing at all. The format
+ * field says so explicitly rather than leaving it as an exception to the rule.
+ */
+#define LS_AUDIO_MAGIC            0x4C534131u   /* "LSA1" */
+#define LS_AUDIO_HEADER_SIZE      20
+#define LS_AUDIO_SAMPLE_RATE      48000u
+#define LS_AUDIO_CHANNELS         2
+#define LS_AUDIO_FORMAT_S16LE     1
+/* 256 frames is 5.33 ms, and 1024 bytes of payload -- comfortably inside a
+ * 1400-byte packet, so audio never fragments even on a standard MTU. */
+#define LS_AUDIO_FRAMES_PER_PACKET 256
+/* Spelled out rather than computed from the three above: Swift's C importer
+ * drops a macro defined in terms of other computed macros, and silently, so the
+ * constant simply does not exist on the host side. rtp_protocol.c asserts at
+ * compile time that these still agree with the arithmetic. */
+#define LS_AUDIO_MAX_PAYLOAD      1024
+#define LS_AUDIO_MAX_PACKET       1044
+
+typedef struct {
+    uint16_t sequence;
+    uint32_t timestamp;      /* frames since the stream started               */
+    uint32_t sample_rate;
+    uint8_t  channels;
+    uint8_t  format;         /* LS_AUDIO_FORMAT_*                             */
+    uint16_t payload_offset; /* indexes into the buffer handed to the parser   */
+    uint16_t payload_length; /* bytes, so frames = length / (channels * 2)     */
+} ls_audio_packet;
+
+/* Returns bytes written, or 0 if cap is too small. */
+size_t ls_audio_write_header(uint8_t *dst, size_t cap,
+                             uint16_t sequence, uint32_t timestamp,
+                             uint32_t sample_rate, uint8_t channels,
+                             uint8_t format);
+
+/* Returns 0 on success, -1 if this is not one of ours or is malformed. A
+ * payload that is not a whole number of frames is rejected: half a frame would
+ * desynchronise the channels for the rest of the stream. */
+int ls_audio_parse(const uint8_t *src, size_t len, ls_audio_packet *out);
 
 /* ------------------------------------------------------------ H.264 NAL --*/
 
@@ -126,14 +182,24 @@ enum {
      * lags by about a screen refresh instead. The cost is that the pointer runs
      * slightly ahead of a window being dragged under it. */
     LS_MSG_CURSOR       = 7,  /* host -> client: where the pointer is         */
-    LS_MSG_CURSOR_IMAGE = 8   /* host -> client: what it looks like           */
+    LS_MSG_CURSOR_IMAGE = 8,  /* host -> client: what it looks like           */
+    /* Playback volume for the client, because the slider is on the host and
+     * the speakers are not. Resent periodically so a lost one heals itself. */
+    LS_MSG_VOLUME       = 9
 };
+
+/* Volume is carried as thousandths, so 1000 is unity and 0 is silence. An
+ * integer keeps it exact across the wire and across both languages. */
+#define LS_VOLUME_SCALE     1000u
 
 /* Flags a client sets in its HELLO. */
 /* It can draw the pointer itself, so the host may leave it out of the video.
  * Without this the host must burn the pointer in, or there would be no pointer
  * on screen anywhere. */
 #define LS_CLIENT_FLAG_DRAWS_CURSOR 0x0001u
+/* It can play the audio stream. Without this the host does not send any, rather
+ * than pouring 1.5 Mb/s into a socket nothing is listening to. */
+#define LS_CLIENT_FLAG_PLAYS_AUDIO  0x0002u
 
 /* Client-reported counters. All cumulative since the client started, except
  * the *_us fields which are rolling averages over the last reporting period. */
@@ -180,6 +246,9 @@ typedef struct {
     uint16_t hotspot_y;
     uint16_t image_offset;
     uint32_t image_length;
+
+    /* VOLUME: thousandths, 0 to LS_VOLUME_SCALE. */
+    uint16_t volume;
 } ls_ctrl_message;
 
 /* Each builder returns the number of bytes written, or 0 if cap was too small.
@@ -199,6 +268,9 @@ size_t ls_ctrl_build_pong(uint8_t *dst, size_t cap, uint64_t token);
 size_t ls_ctrl_build_cursor(uint8_t *dst, size_t cap,
                             uint16_t x, uint16_t y,
                             uint8_t visible, uint16_t image_id);
+
+/* Clamped to LS_VOLUME_SCALE, so a caller cannot ask for amplification. */
+size_t ls_ctrl_build_volume(uint8_t *dst, size_t cap, uint16_t volume);
 
 /* `cap` must be at least LS_CTRL_MAX_PACKET. Returns 0 if the bitmap is larger
  * than LS_CURSOR_MAX_IMAGE_BYTES. */

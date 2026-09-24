@@ -230,6 +230,15 @@ size_t ls_ctrl_build_cursor(uint8_t *dst, size_t cap,
     return total;
 }
 
+size_t ls_ctrl_build_volume(uint8_t *dst, size_t cap, uint16_t volume)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_VOLUME, 2);
+    if (!total) return 0;
+    if (volume > LS_VOLUME_SCALE) volume = LS_VOLUME_SCALE;
+    put_u16(dst + CTRL_HDR + 0, volume);
+    return total;
+}
+
 size_t ls_ctrl_build_cursor_image(uint8_t *dst, size_t cap,
                                   uint16_t image_id,
                                   uint16_t width, uint16_t height,
@@ -285,6 +294,14 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
 
         case LS_MSG_BYE:
         case LS_MSG_KEYFRAME_REQ:
+            return 0;
+
+        case LS_MSG_VOLUME:
+            if (body < 2) return -1;
+            out->volume = get_u16(src + CTRL_HDR + 0);
+            /* A peer that asks for more than unity is malformed, not a licence
+             * to amplify. */
+            if (out->volume > LS_VOLUME_SCALE) return -1;
             return 0;
 
         case LS_MSG_STATS:
@@ -401,4 +418,62 @@ size_t ls_format_mac(char *dst, size_t cap, const uint8_t *mac)
     }
     dst[17] = '\0';
     return 17;
+}
+
+/* ------------------------------------------------------------------ audio */
+
+/* The sizes in the header are literals so Swift can see them. Keep them honest. */
+typedef char ls_audio_payload_size_check[
+    (LS_AUDIO_MAX_PAYLOAD == LS_AUDIO_FRAMES_PER_PACKET * LS_AUDIO_CHANNELS * 2) ? 1 : -1];
+typedef char ls_audio_packet_size_check[
+    (LS_AUDIO_MAX_PACKET == LS_AUDIO_HEADER_SIZE + LS_AUDIO_MAX_PAYLOAD) ? 1 : -1];
+
+size_t ls_audio_write_header(uint8_t *dst, size_t cap,
+                             uint16_t sequence, uint32_t timestamp,
+                             uint32_t sample_rate, uint8_t channels,
+                             uint8_t format)
+{
+    if (!dst || cap < LS_AUDIO_HEADER_SIZE) return 0;
+    if (channels == 0) return 0;
+    put_u32(dst + 0, LS_AUDIO_MAGIC);
+    put_u16(dst + 4, sequence);
+    put_u16(dst + 6, 0);                 /* reserved, must be zero */
+    put_u32(dst + 8, timestamp);
+    put_u32(dst + 12, sample_rate);
+    dst[16] = channels;
+    dst[17] = format;
+    put_u16(dst + 18, 0);                /* reserved */
+    return LS_AUDIO_HEADER_SIZE;
+}
+
+int ls_audio_parse(const uint8_t *src, size_t len, ls_audio_packet *out)
+{
+    size_t payload;
+    size_t frame_bytes;
+
+    if (!src || !out || len < LS_AUDIO_HEADER_SIZE) return -1;
+    if (get_u32(src) != LS_AUDIO_MAGIC) return -1;
+    if (len > LS_AUDIO_MAX_PACKET) return -1;
+
+    memset(out, 0, sizeof(*out));
+    out->sequence    = get_u16(src + 4);
+    out->timestamp   = get_u32(src + 8);
+    out->sample_rate = get_u32(src + 12);
+    out->channels    = src[16];
+    out->format      = src[17];
+
+    if (out->channels == 0 || out->channels > 8) return -1;
+    if (out->format != LS_AUDIO_FORMAT_S16LE) return -1;
+    if (out->sample_rate == 0 || out->sample_rate > 192000u) return -1;
+
+    payload = len - LS_AUDIO_HEADER_SIZE;
+    /* Half a frame would put the channels out of step for the rest of the
+     * stream, so a payload that is not a whole number of them is refused
+     * rather than truncated. */
+    frame_bytes = (size_t)out->channels * 2u;
+    if (payload % frame_bytes) return -1;
+
+    out->payload_offset = LS_AUDIO_HEADER_SIZE;
+    out->payload_length = (uint16_t)payload;
+    return 0;
 }

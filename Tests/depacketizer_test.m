@@ -24,6 +24,7 @@
 //
 #import <Foundation/Foundation.h>
 #import "LSDepacketizer.h"
+#import "LSAudioPlayer.h"
 
 static int gFailures = 0;
 
@@ -468,6 +469,150 @@ static void testControlMessages(void) {
     CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "unknown message type was accepted");
 }
 
+static void testVolumeMessages(void) {
+    printf("volume messages\n");
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+
+    size_t n = ls_ctrl_build_volume(buffer, sizeof(buffer), 640);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "volume did not parse");
+    CHECK(message.type == LS_MSG_VOLUME && message.volume == 640, "volume round trip wrong");
+
+    // The extremes have to survive: silence is a legitimate setting.
+    n = ls_ctrl_build_volume(buffer, sizeof(buffer), 0);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 && message.volume == 0,
+          "silence did not round trip");
+    n = ls_ctrl_build_volume(buffer, sizeof(buffer), LS_VOLUME_SCALE);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 &&
+          message.volume == LS_VOLUME_SCALE, "unity did not round trip");
+
+    // Asking for more than unity is clamped when building...
+    n = ls_ctrl_build_volume(buffer, sizeof(buffer), 60000);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 &&
+          message.volume == LS_VOLUME_SCALE, "over-unity was not clamped");
+
+    // ...and rejected when it arrives from somewhere else, so a corrupt packet
+    // cannot turn into an amplifier.
+    n = ls_ctrl_build_volume(buffer, sizeof(buffer), 500);
+    buffer[8] = 0xFF;   /* rewrite the volume field past unity */
+    buffer[9] = 0xFF;
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "an over-unity packet was accepted");
+}
+
+static void testAudioPackets(void) {
+    printf("audio packets\n");
+    uint8_t packet[LS_AUDIO_MAX_PACKET];
+    ls_audio_packet parsed;
+
+    const int frames = LS_AUDIO_FRAMES_PER_PACKET;
+    size_t header = ls_audio_write_header(packet, sizeof(packet), 7, 4096,
+                                          LS_AUDIO_SAMPLE_RATE, LS_AUDIO_CHANNELS,
+                                          LS_AUDIO_FORMAT_S16LE);
+    CHECK(header == LS_AUDIO_HEADER_SIZE, "audio header size wrong");
+
+    // A recognisable ramp, so a byte-order mistake cannot pass unnoticed.
+    int16_t *samples = (int16_t *)(packet + header);
+    for (int i = 0; i < frames * LS_AUDIO_CHANNELS; i++) samples[i] = (int16_t)(i - 300);
+    size_t total = header + (size_t)frames * LS_AUDIO_CHANNELS * 2;
+
+    CHECK(ls_audio_parse(packet, total, &parsed) == 0, "audio packet did not parse");
+    CHECK(parsed.sequence == 7 && parsed.timestamp == 4096, "audio header round trip wrong");
+    CHECK(parsed.sample_rate == LS_AUDIO_SAMPLE_RATE && parsed.channels == LS_AUDIO_CHANNELS,
+          "audio format round trip wrong");
+    CHECK(parsed.payload_length == frames * LS_AUDIO_CHANNELS * 2, "audio payload length wrong");
+
+    const int16_t *back = (const int16_t *)(packet + parsed.payload_offset);
+    int intact = 1;
+    for (int i = 0; i < frames * LS_AUDIO_CHANNELS; i++) {
+        if (back[i] != (int16_t)(i - 300)) { intact = 0; break; }
+    }
+    CHECK(intact, "audio samples did not survive the round trip");
+
+    // Anything that is not ours, or is malformed, must be refused rather than
+    // played: a wrong frame boundary desynchronises the channels permanently.
+    CHECK(ls_audio_parse(packet, LS_AUDIO_HEADER_SIZE - 1, &parsed) != 0,
+          "a truncated audio header was accepted");
+    CHECK(ls_audio_parse(packet, header + 3, &parsed) != 0,
+          "a partial frame was accepted");
+
+    uint8_t stray[LS_AUDIO_MAX_PACKET];
+    memcpy(stray, packet, total);
+    stray[0] ^= 0xFF;
+    CHECK(ls_audio_parse(stray, total, &parsed) != 0, "a foreign packet was accepted");
+
+    memcpy(stray, packet, total);
+    stray[17] = 99;                       /* unknown sample format */
+    CHECK(ls_audio_parse(stray, total, &parsed) != 0, "an unknown sample format was accepted");
+
+    memcpy(stray, packet, total);
+    stray[16] = 0;                        /* zero channels */
+    CHECK(ls_audio_parse(stray, total, &parsed) != 0, "zero channels was accepted");
+
+    // An empty packet is well formed: it means "no samples", not a broken one.
+    CHECK(ls_audio_parse(packet, header, &parsed) == 0 && parsed.payload_length == 0,
+          "an empty audio packet should be valid");
+}
+
+static void testAudioRing(void) {
+    printf("audio ring buffer\n");
+    // 48 kHz stereo, so 96 samples is a millisecond.
+    LSAudioPlayer *player = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+
+    int16_t out[4096];
+    // Nothing has arrived, so a drain must produce silence rather than noise
+    // and must not claim to have played anything.
+    memset(out, 0xAB, sizeof(out));
+    [player drainInto:out samples:256];
+    int silent = 1;
+    for (int i = 0; i < 256; i++) if (out[i] != 0) { silent = 0; break; }
+    CHECK(silent, "an empty ring did not produce silence");
+    CHECK([player framesPlayed] == 0, "an empty ring claimed to have played frames");
+
+    // Below the priming threshold nothing should come out yet: starting early
+    // just means running dry again immediately.
+    int16_t ramp[8192];
+    for (int i = 0; i < 8192; i++) ramp[i] = (int16_t)(i - 4096);
+    [player enqueueSamples:ramp frames:100];          // 100 frames = 2.08 ms
+    memset(out, 0xAB, sizeof(out));
+    [player drainInto:out samples:64];
+    silent = 1;
+    for (int i = 0; i < 64; i++) if (out[i] != 0) { silent = 0; break; }
+    CHECK(silent, "the ring played before it was primed");
+
+    // Past the threshold (25 ms = 2400 frames) it should hand back exactly what
+    // went in, in order.
+    [player enqueueSamples:ramp + 200 frames:2400];
+    [player drainInto:out samples:200];
+    int ordered = 1;
+    for (int i = 0; i < 200; i++) if (out[i] != ramp[i]) { ordered = 0; break; }
+    CHECK(ordered, "the ring did not return the samples that went in, in order");
+
+    // Overrun: push far more than the 200 ms ring holds and the oldest audio
+    // must be the part that goes, not the newest.
+    LSAudioPlayer *small = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    for (int round = 0; round < 40; round++) {
+        int16_t block[2048];
+        for (int i = 0; i < 2048; i++) block[i] = (int16_t)(round * 1000 + i);
+        [small enqueueSamples:block frames:1024];
+    }
+    CHECK([small overruns] > 0, "overflowing the ring did not count an overrun");
+    [small drainInto:out samples:64];
+    CHECK(out[0] != 0 || out[1] != 0, "after an overrun the ring returned silence");
+    // What survives must be from the later rounds, not the first.
+    CHECK(out[0] >= 1000, "an overrun dropped the newest audio instead of the oldest");
+
+    // Underrun: keep draining past what is there, and the shortfall is silence.
+    // The first drain is satisfied in full; the second is not.
+    uint32_t before = [player underruns];
+    [player drainInto:out samples:4096];
+    CHECK([player underruns] == before, "a drain that was satisfied counted an underrun");
+    [player drainInto:out samples:4096];
+    CHECK([player underruns] == before + 1, "running dry did not count an underrun");
+    int tailSilent = 1;
+    for (int i = 1000; i < 4096; i++) if (out[i] != 0) { tailSilent = 0; break; }
+    CHECK(tailSilent, "the shortfall was not padded with silence");
+}
+
 int main(void) {
     @autoreleasepool {
         testSingleAndFragmented();
@@ -477,6 +622,9 @@ int main(void) {
         testControlMessages();
         testWakeOnLAN();
         testCursorMessages();
+        testVolumeMessages();
+        testAudioPackets();
+        testAudioRing();
 
         if (gFailures == 0) {
             printf("\nAll depacketizer tests passed.\n");

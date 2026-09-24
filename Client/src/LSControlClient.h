@@ -41,6 +41,10 @@
 - (void)sendStats:(const ls_stats *)stats;
 
 /// Fired on the control thread when the host says goodbye.
+/// Playback volume the host wants, 0 to 1. Repeated every couple of seconds,
+/// so a lost one heals itself.
+@property (nonatomic, copy) void (^volumeChanged)(float volume);
+
 @property (nonatomic, copy) void (^hostSaidGoodbye)(void);
 
 /// The pointer, sent separately from the video so it is not a whole

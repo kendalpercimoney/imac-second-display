@@ -20,6 +20,8 @@
 #import "LSDepacketizer.h"
 #import "LSControlClient.h"
 #import "LSPowerManager.h"
+#import "LSAudioPlayer.h"
+#import "LSAudioReceiver.h"
 
 @implementation LSWindow
 - (BOOL)canBecomeKeyWindow { return YES; }
@@ -54,6 +56,10 @@
     NSString *_hostAddress;
     uint16_t  _videoPort;
     uint16_t  _controlPort;
+    uint16_t  _audioPort;
+    BOOL      _audioEnabled;
+    LSAudioPlayer   *_audioPlayer;
+    LSAudioReceiver *_audioReceiver;
     BOOL      _fullscreen;
     BOOL      _statsVisible;
 
@@ -106,6 +112,8 @@
         @"host"        : @"10.0.0.1",
         @"videoPort"   : @(LS_DEFAULT_VIDEO_PORT),
         @"controlPort" : @(LS_DEFAULT_CONTROL_PORT),
+        @"audioPort"   : @(LS_DEFAULT_AUDIO_PORT),
+        @"audio"       : @YES,
         @"windowed"    : @NO,
         @"vsync"       : @NO,
         @"stats"       : @NO,
@@ -115,6 +123,8 @@
     _hostAddress  = [defaults stringForKey:@"host"];
     _videoPort    = (uint16_t)[defaults integerForKey:@"videoPort"];
     _controlPort  = (uint16_t)[defaults integerForKey:@"controlPort"];
+    _audioPort    = (uint16_t)[defaults integerForKey:@"audioPort"];
+    _audioEnabled = [defaults boolForKey:@"audio"];
     _fullscreen   = ![defaults boolForKey:@"windowed"];
     _statsVisible = [defaults boolForKey:@"stats"];
     // Test hook: render N frames, write a PNG, quit. Lets the render path be
@@ -229,6 +239,28 @@
         return;
     }
 
+    if (_audioEnabled) {
+        _audioPlayer = [[LSAudioPlayer alloc] initWithSampleRate:LS_AUDIO_SAMPLE_RATE
+                                                        channels:LS_AUDIO_CHANNELS];
+        NSError *audioError = nil;
+        if (![_audioPlayer start:&audioError]) {
+            // Not fatal. No sound is worse than sound, but far better than no
+            // picture, and the host keeps sending either way.
+            NSLog(@"[LanScreen] audio unavailable: %@", [audioError localizedDescription]);
+            _audioPlayer = nil;
+        } else {
+            _audioReceiver = [[LSAudioReceiver alloc] initWithPort:_audioPort
+                                                            player:_audioPlayer];
+            if (![_audioReceiver start:&audioError]) {
+                NSLog(@"[LanScreen] audio socket unavailable: %@",
+                      [audioError localizedDescription]);
+                [_audioPlayer stop];
+                _audioPlayer = nil;
+                _audioReceiver = nil;
+            }
+        }
+    }
+
     _control = [[LSControlClient alloc] initWithHost:_hostAddress port:_controlPort];
     if (![_control start:&error]) {
         // Not fatal: without the back-channel we still display video, we just
@@ -237,6 +269,12 @@
         _control = nil;
     } else {
         __unsafe_unretained LSAppDelegate *weakSelf = self;
+        LSAudioPlayer *player = _audioPlayer;
+        _control.volumeChanged = ^(float volume) {
+            // Arrives on the control thread. AudioQueueSetParameter is safe
+            // there, so this does not need a hop to main.
+            [player setVolume:volume];
+        };
         _control.hostSaidGoodbye = ^{
             // Arrives on the control thread; the UI work has to hop to main.
             [weakSelf performSelectorOnMainThread:@selector(handleHostDisconnected)
@@ -267,6 +305,9 @@
     // Stop holding the machine awake: with nothing to show, the iMac should be
     // free to sleep on its own schedule.
     [_power endKeepingAwake];
+    // The audio queue and its socket deliberately stay up. Tearing them down
+    // here would mean no sound at all after the host comes back, and an idle
+    // queue simply plays the silence the ring drains to.
     [_depacketizer reset];
     [_glView clear];
     [self updateOverlay];
@@ -432,6 +473,13 @@
             [_glView renderMicroseconds] / 1000.0,
             _glView.vsyncEnabled ? @"on" : @"off"];
         [text appendFormat:@"pointer updates %u\n", [_control cursorMessagesReceived]];
+        if (_audioPlayer) {
+            [text appendFormat:@"audio %5.1f ms buffered   under %u   over %u   vol %3.0f%%\n",
+                [_audioPlayer bufferedMilliseconds], [_audioPlayer underruns],
+                [_audioPlayer overruns], [_audioPlayer volume] * 100.0f];
+        } else if (_audioEnabled) {
+            [text appendString:@"audio: not available\n"];
+        }
         [text appendFormat:@"recv buffer %d KB%@\n",
             [_receiver receiveBufferBytes] / 1024,
             [_receiver receiveBufferBytes] < 1024 * 1024 ? @"   TOO SMALL" : @""];
@@ -541,6 +589,8 @@
     _tickTimer = nil;
     [_power endKeepingAwake];
     [_receiver stop];
+    [_audioReceiver stop];
+    [_audioPlayer stop];
     [_control stop];
     [_decoder stop];
     [NSApp setPresentationOptions:NSApplicationPresentationDefault];

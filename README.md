@@ -60,6 +60,66 @@ Costs about half a decibel of PSNR on hard content (39.9 dB against 40.5 dB on a
 1080p zoom), though the worst single frame is slightly better. It forces
 Constrained Baseline, a subset of the Baseline the iMac already decodes.
 
+### Audio, uncompressed and on its own socket
+
+The Mac's system audio goes to the iMac as raw PCM: 48 kHz, stereo, 16-bit,
+straight from ScreenCaptureKit. There is a switch for it and a volume slider,
+both in the menu bar panel.
+
+**Not compressed.** That is 1.5 Mb/s against 25 to 50 for the video, on a link
+with a gigabit spare. An AAC round trip would add more algorithmic latency than
+the entire rest of the pipeline costs, to save bandwidth that is not scarce.
+
+**Not on the video socket.** A lost audio packet is concealed and forgotten; it
+must never do what a lost video packet does and ask for a keyframe. And audio
+must not queue behind the several hundred packets a keyframe arrives as.
+
+**The volume slider is on the host and the speakers are not**, so the value goes
+over the control channel as thousandths and the client hands it to its audio
+queue, which applies it for free. The samples on the wire are never touched.
+It is repeated every two seconds, because the control channel is UDP and a lost
+one would otherwise leave the iMac at a volume nobody asked for.
+
+Packets are 256 frames — 5.33 ms, 1024 bytes of payload, which fits inside a
+standard MTU with room to spare, so audio never fragments even when the video
+has to be cut down to fit.
+
+Between the socket and the speaker is a 200 ms ring buffer that starts playing
+at 25 ms. That is headroom, not a target: 25 ms is about where a network hiccup
+stops being audible, and every millisecond beyond it is a millisecond of lag
+against the picture. When it overflows the *oldest* audio is dropped, because
+what just arrived is what the screen is showing now.
+
+The header is network byte order like everything else here. The samples are
+deliberately not: they are little-endian because both machines are, and
+byte-swapping ninety-six thousand samples a second on a 2010 CPU would buy
+nothing. The format field says so explicitly rather than leaving it an unwritten
+exception.
+
+**The client must be rebuilt again.** It gained an audio socket and a player,
+and it advertises the capability in its HELLO — a host will not send audio to a
+client that has not said it can play it, rather than pouring 1.5 Mb/s into a
+socket nobody is listening to.
+
+#### What was checked
+
+`./Tests/run_audio_test.sh` pushes 20,000 frames of a ramp through the real
+packetiser in deliberately awkward chunks — 100 frames, then 333, then 1, then
+1024 — and checks what comes out of the parser at the other end of a real
+socket. The seam being tested is that ScreenCaptureKit delivers audio in
+whatever sized pieces it likes while the wire wants whole frames: getting it
+wrong swaps the channels permanently, or loses a few samples per callback, and
+neither fails loudly. Every sample arrived identical and in order, packets
+numbered contiguously, timestamps advancing by exactly the frames sent.
+
+The ring buffer is covered in the unit tests: that it stays silent before it has
+primed, returns what went in, counts an underrun and pads with silence when it
+runs dry, and on overflow drops the oldest audio rather than the newest.
+
+Both were confirmed by breaking them. With the packetiser throwing away the
+remainder between callbacks, 7,079 of 20,000 frames arrive. With the ring
+dropping the newest audio instead of the oldest, the ordering check fails.
+
 ### Measured and rejected
 
 - **`ExpectedFrameRate` of 120 while feeding 60.** Improves the mean about as
@@ -1003,6 +1063,7 @@ Host/                    Swift + SwiftUI, macOS 13+
     UISnapshot.swift         --render-ui, draws every view to PNG and exits
     UnattendedRun.swift      --autostart/--quit-after/--with-window, for measuring
     StreamPlan.swift         settings -> pipeline, in one place, with what it ignored
+    AudioSender.swift        system audio -> fixed PCM packets
     StreamController.swift   pipeline wiring, heartbeat, stats
     CaptureEngine.swift      ScreenCaptureKit
     VideoEncoder.swift       VideoToolbox H.264
@@ -1034,6 +1095,7 @@ Tests/
   run_loopback_test.sh   headless: unit tests + encode/decode round trip
   run_render_test.sh     the OpenGL path, checked numerically
   PathMTU/main.swift     link MTU discovery and the payload clamp
+  AudioLoop/main.swift   PCM from the host packetiser to the client parser
   SettingsAudit/main.swift  every control either does something or says it does not
   NapCheck/main.swift    whether an app with no window gets throttled
 ```

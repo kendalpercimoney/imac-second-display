@@ -48,7 +48,7 @@ CURSOR=$!
 sleep 0.5
 "$OUT/nativeclient/LanScreenClient.app/Contents/MacOS/LanScreenClient" \
     -host 127.0.0.1 -videoPort "$PORT" -controlPort "$CONTROL_PORT" -windowed YES \
-    -vsync "${VSYNC:-NO}" \
+    -vsync "${VSYNC:-NO}" -audio "${AUDIO:-NO}" \
     -snapshot "$SNAPSHOT" -snapshotAfter "${SNAPSHOT_AFTER:-240}" > "$OUT/client.log" 2>&1 &
 CLIENT=$!
 sleep 1.5

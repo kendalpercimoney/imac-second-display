@@ -64,8 +64,10 @@ echo "==> building depacketizer unit tests"
 xcrun clang -fobjc-arc -O1 -Wall -Wno-unused-parameter \
     -I "$ROOT/Common/include" -I "$ROOT/Client/src" \
     -framework Foundation \
+    -framework AudioToolbox \
     "$ROOT/Common/rtp_protocol.c" \
     "$ROOT/Client/src/LSDepacketizer.m" \
+    "$ROOT/Client/src/LSAudioPlayer.m" \
     "$ROOT/Tests/depacketizer_test.m" \
     -o "$OUT/lsdepacketizertest"
 

@@ -70,6 +70,10 @@ final class StreamController: ObservableObject {
     /// Held for as long as we stream: releasing it removes the display.
     private var virtualDisplay: LSVirtualDisplay?
     private var cursorTracker: CursorTracker?
+    private var audioSender: AudioSender?
+    /// Resent periodically, because a lost volume message would otherwise leave
+    /// the iMac at whatever it was last told until something else changed it.
+    private var volumeTimer: DispatchSourceTimer?
 
     private let encodeQueue = DispatchQueue(label: "com.lanscreen.encode", qos: .userInteractive)
 
@@ -307,7 +311,8 @@ final class StreamController: ObservableObject {
         // rather than assume, and carry on with what the link can actually take.
         let requestedPayload = settings.mtuPayload
         let linkMTU = sender.linkMTU
-        let plan = StreamPlan(settings: settings, linkMTU: linkMTU)
+        let plan = StreamPlan(settings: settings, linkMTU: linkMTU,
+                              clientPlaysAudio: client.hasSaidHello ? client.playsAudio : nil)
         let effectivePayload = plan.mtuPayload
         var pathWarnings: [String] = []
         if let mtu = linkMTU, effectivePayload != requestedPayload {
@@ -414,12 +419,24 @@ final class StreamController: ObservableObject {
             self.lastEncodeSubmitTime = CFAbsoluteTimeGetCurrent()
         }
 
+        if plan.sendsAudio {
+            let audio = try AudioSender(host: settings.clientAddress,
+                                        port: UInt16(plan.audioPort))
+            audioSender = audio
+            capture.onAudio = { [weak audio] samples, frames, channels in
+                audio?.send(samples, frames: frames, channels: channels)
+            }
+        }
+
         try await capture.start(displayID: captureDisplayID,
                                 width: plan.width,
                                 height: plan.height,
                                 frameRate: plan.frameRate,
                                 showsCursor: plan.capturesCursor,
-                                useYUV420: plan.capturesYUV420)
+                                useYUV420: plan.capturesYUV420,
+                                capturesAudio: plan.sendsAudio)
+
+        if plan.sendsAudio { startVolumeUpdates(control: control) }
 
         // The pointer is drawn by the client, so it must not also be in the
         // video -- otherwise there are two of them, one lagging the other.
@@ -489,6 +506,8 @@ final class StreamController: ObservableObject {
     private func teardown() async {
         endFullPerformance()
         cursorTracker?.stop(); cursorTracker = nil
+        volumeTimer?.cancel(); volumeTimer = nil
+        audioSender?.flush(); audioSender = nil
         idleTimer?.cancel(); idleTimer = nil
         wakeRetryTimer?.cancel(); wakeRetryTimer = nil
         await MainActor.run { self.statsTimer?.invalidate(); self.statsTimer = nil }
@@ -565,6 +584,37 @@ final class StreamController: ObservableObject {
     /// unless a keyframe was asked for, and when one is asked for, waiting up
     /// to a second to answer was the slowest part of recovering from a lost
     /// packet on an otherwise still screen.
+    /// Sends the volume now and every two seconds after. The control channel is
+    /// UDP, so a single message can go missing; repeating it costs nothing and
+    /// means the iMac is never stuck at a volume nobody asked for.
+    private func startVolumeUpdates(control: ControlChannel) {
+        volumeTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: encodeQueue)
+        timer.schedule(deadline: .now(), repeating: 2.0, leeway: .milliseconds(250))
+        timer.setEventHandler { [weak self, weak control] in
+            guard let self, let control else { return }
+            var buffer = [UInt8](repeating: 0, count: Int(LS_CTRL_MAX_SIZE))
+            let n = ls_ctrl_build_volume(&buffer, buffer.count,
+                                         self.settings.audioVolumeThousandths)
+            if n > 0 { control.send(buffer, count: Int(n)) }
+        }
+        timer.resume()
+        volumeTimer = timer
+    }
+
+    /// Pushes a volume change straight out rather than waiting for the next
+    /// repeat, so dragging the slider is heard as you drag it.
+    func sendVolumeNow() {
+        guard isRunning else { return }
+        let value = settings.audioVolumeThousandths
+        encodeQueue.async { [weak self] in
+            guard let self, let control = self.control else { return }
+            var buffer = [UInt8](repeating: 0, count: Int(LS_CTRL_MAX_SIZE))
+            let n = ls_ctrl_build_volume(&buffer, buffer.count, value)
+            if n > 0 { control.send(buffer, count: Int(n)) }
+        }
+    }
+
     private func startIdleHeartbeat() {
         let timer = DispatchSource.makeTimerSource(queue: encodeQueue)
         timer.schedule(deadline: .now() + 0.25, repeating: 0.25)

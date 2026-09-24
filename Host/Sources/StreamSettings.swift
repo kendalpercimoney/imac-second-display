@@ -99,6 +99,15 @@ final class StreamSettings: ObservableObject {
     /// trip, at the cost of it running slightly ahead of a window being dragged.
     @Published var forwardCursor: Bool { didSet { save(forwardCursor, "forwardCursor") } }
 
+    /// Send the Mac's system audio to the client, which plays it. Raw PCM, so
+    /// it costs 1.5 Mb/s and adds no encode or decode delay of its own.
+    @Published var audioEnabled: Bool { didSet { save(audioEnabled, "audioEnabled") } }
+    /// Playback volume at the client, 0 to 1. The slider is here; the speakers
+    /// are not, so this is sent over the control channel rather than applied to
+    /// the samples.
+    @Published var audioVolume: Double { didSet { save(audioVolume, "audioVolume") } }
+    @Published var audioPort: Int { didSet { save(audioPort, "audioPort") } }
+
     private let defaults = UserDefaults.standard
     private func save(_ value: Any, _ key: String) { defaults.set(value, forKey: "ls." + key) }
 
@@ -130,7 +139,15 @@ final class StreamSettings: ObservableObject {
         lowLatencyEncoder = d.object(forKey: "ls.lowLatencyEncoder") as? Bool ?? true
         captureYUV420 = d.object(forKey: "ls.captureYUV420") as? Bool ?? true
         forwardCursor = d.object(forKey: "ls.forwardCursor") as? Bool ?? true
+        audioEnabled = d.object(forKey: "ls.audioEnabled") as? Bool ?? false
+        audioVolume = d.object(forKey: "ls.audioVolume") as? Double ?? 0.8
+        audioPort = int("audioPort", Int(LS_DEFAULT_AUDIO_PORT))
     }
 
     var bitrateBitsPerSecond: Int { Int(bitrateMbps * 1_000_000) }
+
+    /// The volume as the wire carries it: thousandths, clamped to unity.
+    var audioVolumeThousandths: UInt16 {
+        UInt16(max(0, min(1, audioVolume)) * Double(LS_VOLUME_SCALE))
+    }
 }

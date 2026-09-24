@@ -43,6 +43,7 @@ struct MenuBarPanel: View {
                 startButton
                 meters
                 linkGroup
+                audioGroup
                 switchesGroup
                 if let error = controller.lastError { notice(error, colour: Aero.red) }
                 if !controller.warnings.isEmpty {
@@ -246,6 +247,42 @@ struct MenuBarPanel: View {
                 .lineLimit(1)
         }
         .frame(width: 104, alignment: .leading)
+    }
+
+    // MARK: - Audio
+
+    private var audioGroup: some View {
+        Aero.Group(title: "Audio", accent: Aero.blue) {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Send this Mac's audio", isOn: $settings.audioEnabled)
+                    .disabled(controller.isRunning)
+
+                HStack(spacing: 7) {
+                    Image(systemName: settings.audioVolume < 0.01
+                          ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Aero.inkFaint)
+                        .frame(width: 14)
+                    Slider(value: $settings.audioVolume, in: 0...1)
+                    Text("\(Int(settings.audioVolume * 100))%")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Aero.ink)
+                        .frame(width: 36, alignment: .trailing)
+                }
+                .disabled(!settings.audioEnabled)
+                .opacity(settings.audioEnabled ? 1 : 0.5)
+                // Pushed the moment it changes rather than waiting for the
+                // repeat, so dragging the slider is heard as you drag it.
+                .onChange(of: settings.audioVolume) { _ in controller.sendVolumeNow() }
+
+                if settings.audioEnabled && controller.client.hasSaidHello
+                    && !controller.client.playsAudio {
+                    Text("This client cannot play audio. Rebuild it.")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Aero.red)
+                }
+            }
+        }
     }
 
     // MARK: - The three switches worth reaching for

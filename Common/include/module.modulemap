@@ -1,0 +1,6 @@
+// Used by SwiftPM for the LSProtocol target, and by the standalone swiftc
+// invocation in Tests/run_loopback_test.sh.
+module LSProtocol {
+    header "rtp_protocol.h"
+    export *
+}

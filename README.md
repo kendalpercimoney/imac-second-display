@@ -120,6 +120,59 @@ Both were confirmed by breaking them. With the packetiser throwing away the
 remainder between callbacks, 7,079 of 20,000 frames arrive. With the ring
 dropping the newest audio instead of the oldest, the ordering check fails.
 
+### Audio delay, and why negative is the direction that matters
+
+Audio takes a much shorter path than video — capture, one hop, play — while
+video goes through an encoder, the network and a decoder. You would expect sound
+to arrive early and need holding back. In practice it does not, because the far
+end puts it in a jitter buffer and then in an audio queue, and those cost more
+than the whole video pipeline saves. So the useful direction is usually
+*negative*: pull the sound earlier.
+
+The slider runs from −50 ms to +250 ms and is remembered between runs like every
+other setting. It is sent over the control channel and applied by the client,
+which is where the sound actually comes out.
+
+What it changes is how much audio the client's ring holds back at all times.
+That is what makes the ring a delay line rather than just somewhere packets
+land: keep 25 ms behind permanently and every sample waits 25 ms. Zero plays
+each packet the instant it arrives.
+
+**There is a floor, and the app is honest about it.** Underneath the ring sits
+the audio queue's own buffers, and audio already handed to the hardware cannot
+be pulled back. Those were three buffers of 10 ms; they are now three of 5,
+which halves the floor to 15 ms specifically so the negative end of the slider
+has somewhere to go. Below that, pulling audio earlier would mean delaying the
+video, which is the one thing this project exists not to do.
+
+The client's overlay shows all three numbers — what is buffered, what is being
+held deliberately, and the hardware floor — so the slider can be set by reading
+rather than by guessing.
+
+The unit tests cover it: that a 10 ms target holds exactly 10 ms back, that the
+next millisecond to arrive releases exactly one millisecond, and that what comes
+out is the oldest audio rather than the newest. Confirmed by breaking it both
+ways — ignoring the target, and making the setter do nothing. The signed wire
+value has its own test, because a negative number travelling through an unsigned
+field is precisely the kind of thing that works for positive values and silently
+does not for negative ones; that one was confirmed by masking the sign bit off.
+
+### The iMac's screen brightness
+
+A slider on the host, applied on the iMac through `IODisplaySetFloatParameter`.
+That is the old IODisplayConnect interface, which is exactly why it works here:
+a 2010 panel exposes brightness through it where a current Mac does not. A
+display that refuses is not an error — the client says so in its overlay rather
+than the host pretending it worked.
+
+It is put back to whatever it was when the client quits. Leaving someone's
+screen dark because an app exited would be rude, and on a machine being used as
+a second display it would not be obvious what had done it.
+
+The value is repeated every two seconds along with the volume and the audio
+delay, for the same reason: the control channel is UDP, and a lost message would
+otherwise leave the iMac at a setting nobody chose.
+
 ### Measured and rejected
 
 - **`ExpectedFrameRate` of 120 while feeding 60.** Improves the mean about as
@@ -1083,8 +1136,12 @@ Host/VirtualDisplay/
   WakeOnLAN.swift        magic packets, bound to the direct link
 Client/src/
   LSPowerManager.m       keeps the iMac awake while a stream is showing
+  LSAudioPlayer.m        AudioQueue, and the delay line in front of it
+  LSAudioReceiver.m      the audio socket and its receive loop
+  LSBrightness.m         the iMac's panel, driven from the other machine
 Tools/
   serve_to_imac.sh       packages the client source and serves it to the iMac
+  fetch_from_imac.sh     brings the built client back the other way
 Tests/
   depacketizer_test.m    unit tests
   loopreceive.m          loopback receiver + latency measurement

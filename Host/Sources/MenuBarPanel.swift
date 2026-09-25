@@ -37,20 +37,15 @@ struct MenuBarPanel: View {
     @ObservedObject var settings: StreamSettings
     @ObservedObject var controller: StreamController
 
-    /// The tallest the panel may be. A MenuBarExtra window hangs off the menu
-    /// bar and is not scrolled or repositioned for you: make it taller than the
-    /// screen and the far end is simply not reachable. The panel had grown to
-    /// 718 points, which is fine on a large display and is not on a laptop, so
-    /// it is bounded by the screen it is actually on and scrolls inside that.
-    private var maximumBodyHeight: CGFloat {
-        let screen = NSScreen.main?.visibleFrame.height ?? 800
-        return max(320, screen - 120)
-    }
-
+    // No ScrollView here, and that is deliberate rather than an oversight. A
+    // MenuBarExtra popover takes its size from its content, and a ScrollView
+    // has no height of its own to give it -- it fills whatever it is handed,
+    // which in a popover is nothing. Wrapping the body in one made the panel
+    // stop appearing at all. The way to make this fit a laptop screen is for it
+    // to be shorter, not for it to scroll.
     var body: some View {
         VStack(spacing: 0) {
             titleBar
-            ScrollView(.vertical) {
             VStack(spacing: 9) {
                 startButton
                 meters
@@ -70,8 +65,6 @@ struct MenuBarPanel: View {
             .padding(.horizontal, 11)
             .padding(.top, 10)
             .padding(.bottom, 11)
-            }
-            .frame(maxHeight: maximumBodyHeight)
         }
         .frame(width: 372)
         .background(Aero.GlassBackground())
@@ -244,8 +237,8 @@ struct MenuBarPanel: View {
                             alarm: controller.packetsNotSent > 0)
                     readout("Corrupt", "\(controller.client.stats.frames_corrupt)",
                             alarm: controller.client.stats.frames_corrupt > 0)
-                    readout("Interface", controller.linkInterfaceName.isEmpty
-                            ? "—" : controller.linkInterfaceName)
+                    readout("Encode", controller.encodeMilliseconds > 0
+                            ? String(format: "%.2f ms", controller.encodeMilliseconds) : "—")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -278,42 +271,27 @@ struct MenuBarPanel: View {
     /// type, on which interface, rather than leaving "Packet 1472 B" in red
     /// with no way to act on it.
     private var jumboHint: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("Cut to \(controller.effectiveMTUPayload) B to fit an MTU of "
-                 + "\(controller.linkMTUBytes). For the full "
-                 + "\(settings.mtuPayload) B, on both machines:")
-                .font(.system(size: 9.5))
-                .foregroundStyle(Aero.inkFaint)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 6) {
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("For the full \(String(settings.mtuPayload)) B, on both machines:")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Aero.inkFaint)
                 Text(jumboCommand)
                     .font(.system(size: 9.5, design: .monospaced))
                     .foregroundStyle(Aero.ink)
                     .textSelection(.enabled)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Spacer(minLength: 0)
-                Button("Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(jumboCommand, forType: .string)
-                }
-                .buttonStyle(AeroButtonStyle())
-                .controlSize(.small)
+                    .lineLimit(1).minimumScaleFactor(0.8)
             }
-            .padding(.horizontal, 6).padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.black.opacity(0.05))
-                    .overlay(RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(Color.black.opacity(0.10), lineWidth: 0.75)))
-
-            Text("It does not outlive a reboot, and the iMac's interface is its own.")
-                .font(.system(size: 9))
-                .foregroundStyle(Aero.inkFaint.opacity(0.85))
-                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button("Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(jumboCommand, forType: .string)
+            }
+            .buttonStyle(AeroButtonStyle())
+            .controlSize(.small)
         }
-        .padding(.top, 5)
+        .padding(.horizontal, 6).padding(.vertical, 4)
+        .padding(.top, 4)
     }
 
     private var jumboCommand: String {

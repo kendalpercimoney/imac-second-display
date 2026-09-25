@@ -99,9 +99,15 @@ final class StreamController: ObservableObject {
     private var startedWithLinkMTU: Int?
     private var forceKeyframeFlag = false
     private var sdpWritten = false
-    /// Whether the stream we stopped was stopped because this Mac slept, and so
-    /// is owed back on wake.
-    private var stoppedBySleep = false
+    /// Whether the stream that stopped was stopped by this app rather than by
+    /// the user, and so is owed back.
+    private var owesResume = false
+    /// How many times in a row we have restarted a stream that then died
+    /// quickly. Retrying is right for a capture that stopped because the Mac
+    /// slept; it is wrong for one that stops immediately every time, which is
+    /// what a revoked Screen Recording grant looks like, and retrying that
+    /// forever would be worse than the freeze it is meant to fix.
+    private var shortLivedResumes = 0
     /// When the current stream started, so the log lines carry an elapsed time
     /// rather than only a wall clock.
     private var startedAt: Date?
@@ -191,7 +197,7 @@ final class StreamController: ObservableObject {
             // after every lid close, which is indistinguishable from a freeze:
             // the screen you are looking at stops updating and nothing says
             // why.
-            self.stop(becauseOfSleep: true)
+            self.stop(resumeWhenPossible: true)
         })
     }
 
@@ -203,31 +209,31 @@ final class StreamController: ObservableObject {
     /// that greeted every wake. `startStreaming` retries that lookup, and this
     /// gives the machine a moment before the first attempt regardless.
     private func resumeAfterWakeIfNeeded() {
-        guard stoppedBySleep else { return }
+        guard owesResume else { return }
         onMain { self.statusText = "Resuming after wake…" }
-        scheduleWakeResume(after: 2.0, attemptsLeft: 12)
+        // The timers scheduled at stop() time did not fire while the Mac was
+        // asleep, or fired and found no displays yet. Start a fresh round now
+        // that the machine is actually up.
+        scheduleResume(after: 2.0, attemptsLeft: 12)
     }
 
-    /// The flag is cleared when the stream is actually handed back, not when
-    /// the wake notification arrives.
+    /// Put the stream back, once whatever took it away has finished.
     ///
-    /// `stop()` tears down inside a Task, so `isRunning` is still true for a
-    /// moment afterwards. A wake that arrives promptly -- closing and opening
-    /// the lid, which is the common case -- would otherwise find the old stream
-    /// still shutting down, conclude there was nothing to resume, and leave the
-    /// iMac dark with the flag already cleared.
-    private func scheduleWakeResume(after delay: TimeInterval, attemptsLeft: Int) {
+    /// The flag is cleared when the stream is actually handed back, not when
+    /// the attempt is scheduled. `stop()` tears down inside a Task, so
+    /// `isRunning` is still true for a moment afterwards; a resume that checked
+    /// once would find the old stream still shutting down, conclude there was
+    /// nothing to resume, and leave the iMac dark with the flag already
+    /// cleared.
+    private func scheduleResume(after delay: TimeInterval, attemptsLeft: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, self.stoppedBySleep else { return }
+            guard let self, self.owesResume else { return }
             guard !self.isRunning else {
-                guard attemptsLeft > 0 else {
-                    self.stoppedBySleep = false
-                    return
-                }
-                self.scheduleWakeResume(after: 0.5, attemptsLeft: attemptsLeft - 1)
+                guard attemptsLeft > 0 else { self.owesResume = false; return }
+                self.scheduleResume(after: 0.5, attemptsLeft: attemptsLeft - 1)
                 return
             }
-            self.stoppedBySleep = false
+            self.owesResume = false
             self.start()
         }
     }
@@ -335,11 +341,28 @@ final class StreamController: ObservableObject {
 
     /// A stop the user asked for. Anything the app stops by itself says so,
     /// because only one of the two is owed back afterwards.
-    func stop() { stop(becauseOfSleep: false) }
+    func stop() { stop(resumeWhenPossible: false) }
 
-    private func stop(becauseOfSleep: Bool) {
+    private func stop(resumeWhenPossible: Bool) {
         guard isRunning else { return }
-        stoppedBySleep = becauseOfSleep
+
+        var resuming = resumeWhenPossible
+        if resumeWhenPossible {
+            let ranFor = Date().timeIntervalSince(startedAt ?? Date())
+            shortLivedResumes = ranFor < 15 ? shortLivedResumes + 1 : 0
+            if shortLivedResumes > 3 {
+                resuming = false
+                onMain {
+                    self.lastError = "The capture keeps stopping as soon as it starts. "
+                        + "Check Screen Recording in System Settings, then press Start."
+                }
+            }
+        } else {
+            shortLivedResumes = 0
+        }
+
+        owesResume = resuming
+        if resuming { scheduleResume(after: 2.0, attemptsLeft: 12) }
         onMain { self.statusText = "Stopping…" }
         Task {
             await teardown()
@@ -448,8 +471,14 @@ final class StreamController: ObservableObject {
         }
         capture.onStreamStopped = { [weak self] error in
             guard let self else { return }
+            // ScreenCaptureKit stops when the Mac sleeps, whatever "stop when
+            // this Mac sleeps" is set to -- that setting decides whether we
+            // send BYE first, not whether the capture survives. So this, not
+            // the sleep notification, is how the stream usually ends, and it
+            // used to end here for good: the iMac kept showing the last frame
+            // it was sent, which is indistinguishable from a freeze.
             self.onMain { self.lastError = "Capture stopped: \(error.localizedDescription)" }
-            self.stop()
+            self.stop(resumeWhenPossible: true)
         }
 
         encodeQueue.sync {

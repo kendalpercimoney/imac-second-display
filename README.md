@@ -355,23 +355,39 @@ otherwise leave the iMac at a setting nobody chose.
 
 ### Sleep, and coming back from it
 
-Closing the lid stops the stream, which is deliberate: stopping sends BYE, the
-client drops its keep-awake assertion, and the iMac sleeps too instead of
-sitting lit up all night on a frozen frame.
+ScreenCaptureKit stops when the Mac sleeps. "Stop streaming when this Mac
+sleeps" decides whether BYE is sent first — so the iMac drops its keep-awake
+assertion and sleeps too rather than sitting lit up all night on a frozen frame
+— but it does not decide whether the capture survives. Nothing does. The capture
+ends either way, which is why turning that setting off did not avoid any of
+this.
 
-Waking now puts it back. It did not, and the two halves of that failed
-separately. A stream the app stopped by itself was indistinguishable from one
-the user stopped, so nothing was owed back — the iMac simply stayed dark, which
-from the front looks exactly like a freeze: the screen stops updating and
-nothing says why. And pressing Start afterwards met "No capturable display
-found", because `SCShareableContent` returns an empty list for a second or two
-after wake while the window server republishes displays, and it was asked once.
-It is now retried for five seconds, and a stop the app performed is recorded as
-distinct from a stop the user asked for.
+So the usual way this stream ended was `onStreamStopped`, and that called
+`stop()` and left it there. The iMac went on showing the last frame it had been
+sent, which from in front of it is indistinguishable from a freeze: the picture
+stops and nothing says why. Pressing Start afterwards then met "No capturable
+display found", because `SCShareableContent` returns an empty list for a second
+or two after wake while the window server republishes displays, and it was asked
+exactly once.
 
-The resume waits for the teardown to finish rather than assuming it has.
-`stop()` tears down inside a Task, so a lid closed and opened straight away —
-the common case — finds the old stream still shutting down.
+A stop the app performs is now recorded as distinct from a stop the user asked
+for, only the first is owed back, and the display lookup is retried for five
+seconds. The resume waits for the teardown to finish rather than assuming it
+has — `stop()` tears down inside a Task, so a lid closed and opened straight
+away finds the old stream still shutting down.
+
+Bounded, because retrying is right for a capture that stopped because the Mac
+slept and wrong for one that stops immediately every time. Four short-lived
+restarts in a row and it gives up and says to check Screen Recording, which is
+what that failure actually looks like.
+
+### The panel is not in a ScrollView
+
+A `MenuBarExtra` popover takes its size from its content, and a `ScrollView` has
+no height of its own to give it — it fills what it is handed, which in a popover
+is nothing. Wrapping the body in one, to stop a 718-point panel running off the
+bottom of a laptop screen, made the panel stop appearing at all. The way to make
+it fit is for it to be shorter.
 
 ### Measured and rejected
 
@@ -517,23 +533,39 @@ loss, this is what they are.
 
 ### Sleep, and coming back from it
 
-Closing the lid stops the stream, which is deliberate: stopping sends BYE, the
-client drops its keep-awake assertion, and the iMac sleeps too instead of
-sitting lit up all night on a frozen frame.
+ScreenCaptureKit stops when the Mac sleeps. "Stop streaming when this Mac
+sleeps" decides whether BYE is sent first — so the iMac drops its keep-awake
+assertion and sleeps too rather than sitting lit up all night on a frozen frame
+— but it does not decide whether the capture survives. Nothing does. The capture
+ends either way, which is why turning that setting off did not avoid any of
+this.
 
-Waking now puts it back. It did not, and the two halves of that failed
-separately. A stream the app stopped by itself was indistinguishable from one
-the user stopped, so nothing was owed back — the iMac simply stayed dark, which
-from the front looks exactly like a freeze: the screen stops updating and
-nothing says why. And pressing Start afterwards met "No capturable display
-found", because `SCShareableContent` returns an empty list for a second or two
-after wake while the window server republishes displays, and it was asked once.
-It is now retried for five seconds, and a stop the app performed is recorded as
-distinct from a stop the user asked for.
+So the usual way this stream ended was `onStreamStopped`, and that called
+`stop()` and left it there. The iMac went on showing the last frame it had been
+sent, which from in front of it is indistinguishable from a freeze: the picture
+stops and nothing says why. Pressing Start afterwards then met "No capturable
+display found", because `SCShareableContent` returns an empty list for a second
+or two after wake while the window server republishes displays, and it was asked
+exactly once.
 
-The resume waits for the teardown to finish rather than assuming it has.
-`stop()` tears down inside a Task, so a lid closed and opened straight away —
-the common case — finds the old stream still shutting down.
+A stop the app performs is now recorded as distinct from a stop the user asked
+for, only the first is owed back, and the display lookup is retried for five
+seconds. The resume waits for the teardown to finish rather than assuming it
+has — `stop()` tears down inside a Task, so a lid closed and opened straight
+away finds the old stream still shutting down.
+
+Bounded, because retrying is right for a capture that stopped because the Mac
+slept and wrong for one that stops immediately every time. Four short-lived
+restarts in a row and it gives up and says to check Screen Recording, which is
+what that failure actually looks like.
+
+### The panel is not in a ScrollView
+
+A `MenuBarExtra` popover takes its size from its content, and a `ScrollView` has
+no height of its own to give it — it fills what it is handed, which in a popover
+is nothing. Wrapping the body in one, to stop a 718-point panel running off the
+bottom of a laptop screen, made the panel stop appearing at all. The way to make
+it fit is for it to be shorter.
 
 ### Measured and rejected: App Nap
 

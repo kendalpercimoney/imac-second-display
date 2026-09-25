@@ -81,6 +81,23 @@ content. The bitrate is settable on a live compression session and does not
 change the SPS, so it takes effect on the next frame and the iMac never notices
 anything happened.
 
+**Changing it replaces the compression session** rather than setting a property
+on the running one, because setting the property does not work.
+`kVTCompressionPropertyKey_AverageBitRate` on a live session returns `noErr` and
+changes nothing: asked to go from 25 to 60 Mb/s mid-stream on content that
+wanted every bit of it, the encoder carried on at 25.8 Mb/s. The first version
+of Video mode did exactly that and the report back was "video mode doesn't
+change the stats", which is precisely what it was doing.
+`./Tests/run_bitrate_switch_test.sh` measures both ways and requires that the
+one the app uses works (25.8 → 61.4 Mb/s) and that the one it used to use still
+does not — if a future macOS fixes the property, that assertion fails and says
+so.
+
+Replacing the session costs a keyframe and a few tens of milliseconds. The old
+session is stopped *before* the new one starts: VideoToolbox serialises output
+callbacks within a session but not between two of them, and both would be
+writing into the packetizer's single packet buffer.
+
 **It costs no latency**, which is not what was intended. It was going to spend
 some: let the encoder hold frames to look ahead, loosen the burst cap so a cut
 is not rationed out over the following second. Neither survived measurement.
@@ -336,6 +353,26 @@ The value is repeated every two seconds along with the volume and the audio
 delay, for the same reason: the control channel is UDP, and a lost message would
 otherwise leave the iMac at a setting nobody chose.
 
+### Sleep, and coming back from it
+
+Closing the lid stops the stream, which is deliberate: stopping sends BYE, the
+client drops its keep-awake assertion, and the iMac sleeps too instead of
+sitting lit up all night on a frozen frame.
+
+Waking now puts it back. It did not, and the two halves of that failed
+separately. A stream the app stopped by itself was indistinguishable from one
+the user stopped, so nothing was owed back — the iMac simply stayed dark, which
+from the front looks exactly like a freeze: the screen stops updating and
+nothing says why. And pressing Start afterwards met "No capturable display
+found", because `SCShareableContent` returns an empty list for a second or two
+after wake while the window server republishes displays, and it was asked once.
+It is now retried for five seconds, and a stop the app performed is recorded as
+distinct from a stop the user asked for.
+
+The resume waits for the teardown to finish rather than assuming it has.
+`stop()` tears down inside a Task, so a lid closed and opened straight away —
+the common case — finds the old stream still shutting down.
+
 ### Measured and rejected
 
 - **`ExpectedFrameRate` of 120 while feeding 60.** Takes the encoder's hold
@@ -478,6 +515,26 @@ five seconds, so it is not worth a protocol change to fix. If `netstat -s -p ip`
 shows a handful of fragmented datagrams while streaming and the video shows no
 loss, this is what they are.
 
+### Sleep, and coming back from it
+
+Closing the lid stops the stream, which is deliberate: stopping sends BYE, the
+client drops its keep-awake assertion, and the iMac sleeps too instead of
+sitting lit up all night on a frozen frame.
+
+Waking now puts it back. It did not, and the two halves of that failed
+separately. A stream the app stopped by itself was indistinguishable from one
+the user stopped, so nothing was owed back — the iMac simply stayed dark, which
+from the front looks exactly like a freeze: the screen stops updating and
+nothing says why. And pressing Start afterwards met "No capturable display
+found", because `SCShareableContent` returns an empty list for a second or two
+after wake while the window server republishes displays, and it was asked once.
+It is now retried for five seconds, and a stop the app performed is recorded as
+distinct from a stop the user asked for.
+
+The resume waits for the teardown to finish rather than assuming it has.
+`stop()` tears down inside a Task, so a lid closed and opened straight away —
+the common case — finds the old stream still shutting down.
+
 ### Measured and rejected: App Nap
 
 Moving the host into the menu bar changed one thing about how the OS sees the
@@ -558,6 +615,11 @@ passes when the lookup returns the wrong interface — and that it cuts the
 payload to fit. Both halves were confirmed by breaking them: with the clamp
 disabled and with the interface lookup taking the first interface it sees, the
 test fails in each case.
+
+`./Tests/run_bitrate_switch_test.sh` checks that Video mode's bitrate reaches
+the encoder, in about 25 seconds. It is a characterisation test of VideoToolbox
+rather than of this app's code: it measures what the two ways of changing a
+bitrate actually do, which is the fact the app is built on.
 
 `./Tests/QualityCheck` produced the picture-quality numbers above, and
 `./Tests/run_loopback_test.sh` the latency ones. It takes `PIPELINE=` to pick

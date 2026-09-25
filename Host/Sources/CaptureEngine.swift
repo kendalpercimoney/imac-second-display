@@ -61,13 +61,35 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
     func start(displayID: UInt32, width: Int, height: Int,
                frameRate: Int, showsCursor: Bool, useYUV420: Bool = true,
                capturesAudio: Bool = false) async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            false, onScreenWindowsOnly: false)
-
-        guard let display = content.displays.first(where: { $0.displayID == displayID })
-                         ?? content.displays.first else {
+        // Retried, because the answer right after this Mac wakes is wrong
+        // rather than final. The window server has not finished republishing
+        // displays, so SCShareableContent returns an empty list -- or throws --
+        // for a second or two, and asking once turned every wake into
+        // "No capturable display found" when there was nothing wrong with the
+        // display and waiting would have found it.
+        var display: SCDisplay?
+        var lastError: Error?
+        for attempt in 0..<10 {
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(
+                    false, onScreenWindowsOnly: false)
+                if let found = content.displays.first(where: { $0.displayID == displayID })
+                            ?? content.displays.first {
+                    display = found
+                    break
+                }
+            } catch {
+                lastError = error
+            }
+            if attempt < 9 { try? await Task.sleep(nanoseconds: 500_000_000) }
+        }
+        guard let display else {
             throw NSError(domain: "LanScreen", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "No capturable display found."
+                NSLocalizedDescriptionKey:
+                    "No capturable display found after five seconds."
+                    + (lastError.map { " (\($0.localizedDescription))" } ?? "")
+                    + " If this Mac has just woken, try Start again; if it keeps"
+                    + " happening, check Screen Recording in System Settings."
             ])
         }
 

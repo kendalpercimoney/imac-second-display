@@ -37,9 +37,20 @@ struct MenuBarPanel: View {
     @ObservedObject var settings: StreamSettings
     @ObservedObject var controller: StreamController
 
+    /// The tallest the panel may be. A MenuBarExtra window hangs off the menu
+    /// bar and is not scrolled or repositioned for you: make it taller than the
+    /// screen and the far end is simply not reachable. The panel had grown to
+    /// 718 points, which is fine on a large display and is not on a laptop, so
+    /// it is bounded by the screen it is actually on and scrolls inside that.
+    private var maximumBodyHeight: CGFloat {
+        let screen = NSScreen.main?.visibleFrame.height ?? 800
+        return max(320, screen - 120)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             titleBar
+            ScrollView(.vertical) {
             VStack(spacing: 9) {
                 startButton
                 meters
@@ -59,6 +70,8 @@ struct MenuBarPanel: View {
             .padding(.horizontal, 11)
             .padding(.top, 10)
             .padding(.bottom, 11)
+            }
+            .frame(maxHeight: maximumBodyHeight)
         }
         .frame(width: 372)
         .background(Aero.GlassBackground())
@@ -224,8 +237,20 @@ struct MenuBarPanel: View {
                                 && controller.effectiveMTUPayload != settings.mtuPayload)
                     readout("Keyframes", "\(controller.keyframeRequests)")
                 }
+                GridRow {
+                    // Not the same thing as the client's Lost: these never
+                    // left this Mac, so the client cannot know about them.
+                    readout("Not sent", "\(controller.packetsNotSent)",
+                            alarm: controller.packetsNotSent > 0)
+                    readout("Corrupt", "\(controller.client.stats.frames_corrupt)",
+                            alarm: controller.client.stats.frames_corrupt > 0)
+                    readout("Interface", controller.linkInterfaceName.isEmpty
+                            ? "—" : controller.linkInterfaceName)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            if jumboAvailable { jumboHint }
 
             if settings.forwardCursor && controller.client.hasSaidHello
                 && !controller.client.drawsCursor {
@@ -237,6 +262,63 @@ struct MenuBarPanel: View {
                     .padding(.top, 4)
             }
         }
+    }
+
+    /// Whether the configured packet size is being cut down to fit the link,
+    /// which is the only situation in which raising the MTU would change
+    /// anything.
+    private var jumboAvailable: Bool {
+        controller.isRunning
+            && controller.effectiveMTUPayload > 0
+            && controller.effectiveMTUPayload != settings.mtuPayload
+    }
+
+    /// Jumbo frames are a property of the cable and both machines, not of this
+    /// app, so the app cannot turn them on. It can at least say exactly what to
+    /// type, on which interface, rather than leaving "Packet 1472 B" in red
+    /// with no way to act on it.
+    private var jumboHint: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Cut to \(controller.effectiveMTUPayload) B to fit an MTU of "
+                 + "\(controller.linkMTUBytes). For the full "
+                 + "\(settings.mtuPayload) B, on both machines:")
+                .font(.system(size: 9.5))
+                .foregroundStyle(Aero.inkFaint)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 6) {
+                Text(jumboCommand)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(Aero.ink)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+                Button("Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(jumboCommand, forType: .string)
+                }
+                .buttonStyle(AeroButtonStyle())
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.black.opacity(0.05))
+                    .overlay(RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(Color.black.opacity(0.10), lineWidth: 0.75)))
+
+            Text("It does not outlive a reboot, and the iMac's interface is its own.")
+                .font(.system(size: 9))
+                .foregroundStyle(Aero.inkFaint.opacity(0.85))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 5)
+    }
+
+    private var jumboCommand: String {
+        let name = controller.linkInterfaceName.isEmpty ? "en0" : controller.linkInterfaceName
+        return "sudo ifconfig \(name) mtu 9000"
     }
 
     private func readout(_ label: String, _ value: String, alarm: Bool = false) -> some View {
@@ -407,11 +489,6 @@ struct MenuBarPanel: View {
                             .foregroundStyle(Aero.inkFaint)
                     }
                     .padding(.leading, 2)
-                }
-                if controller.isRunning {
-                    Text("Greyed switches are read when the stream starts.")
-                        .font(.system(size: 9))
-                        .foregroundStyle(Aero.inkFaint.opacity(0.8))
                 }
             }
         }

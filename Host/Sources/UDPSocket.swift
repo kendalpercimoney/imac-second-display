@@ -84,6 +84,18 @@ final class UDPSender {
 
     deinit { if fd >= 0 { close(fd) } }
 
+    /// The name of the interface that routes to the client, e.g. "en7". Shown
+    /// in the panel so the instruction for raising the MTU names the right one:
+    /// there are usually several, and `ifconfig` on the wrong one does nothing.
+    /// Filled in by `linkMTU`, which has already had to work it out.
+    fileprivate(set) var linkInterfaceName: String?
+
+    /// Packets the kernel would not take, even after retrying. Counted rather
+    /// than ignored: a packet dropped here never reaches the client, and the
+    /// symptom is a blocky picture with the client reporting no loss at all,
+    /// because from its side nothing was ever sent.
+    private(set) var dropped: UInt64 = 0
+
     /// Returns bytes sent, or -1. ENOBUFS is retried a few times: it means the
     /// interface queue is momentarily full, not that anything is broken.
     @discardableResult
@@ -95,10 +107,11 @@ final class UDPSender {
             if errno == EINTR { continue }
             if errno == ENOBUFS || errno == EAGAIN {
                 attempts += 1
-                if attempts > 64 { return -1 }
+                if attempts > 64 { dropped &+= 1; return -1 }
                 usleep(50)
                 continue
             }
+            dropped &+= 1
             return -1
         }
     }
@@ -226,6 +239,7 @@ extension UDPSender {
             cursor = entry.pointee.ifa_next
         }
         guard let name = interfaceName else { return nil }
+        linkInterfaceName = name
 
         // ...and what that interface's link layer says it can carry.
         cursor = head

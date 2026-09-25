@@ -35,6 +35,8 @@ enum UISnapshot {
               to: directory.appendingPathComponent("panel-idle.png"),
               width: 372)
 
+        // 8900 against a 1500 link, which is the state the hint exists for.
+        settings.mtuPayload = 8900
         controller.applyPreviewState()
         write(MenuBarPanel(settings: settings, controller: controller),
               to: directory.appendingPathComponent("panel-running.png"),

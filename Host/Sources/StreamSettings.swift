@@ -84,14 +84,30 @@ final class StreamSettings: ObservableObject {
     /// counts as user activity and suppresses the throttling.
     @Published var preventAppNap: Bool { didSet { save(preventAppNap, "preventAppNap") } }
 
-    /// VideoToolbox's low-latency rate controller, plus capturing in 4:2:0 so
-    /// the encoder is handed the format it wants. Measured together as the
-    /// encoder's hold time dropping from about 16 ms to about 9 ms, with the
-    /// p95 roughly halved. Costs about half a decibel of PSNR on hard content,
-    /// and forces Constrained Baseline -- a subset of the Baseline the iMac
-    /// already decodes.
-    @Published var lowLatencyEncoder: Bool { didSet { save(lowLatencyEncoder, "lowLatencyEncoder") } }
+    /// Capture in 4:2:0 so the encoder is handed the format it wants, rather
+    /// than BGRA it has to convert first. H.264 is 4:2:0 either way, so this
+    /// costs no picture; it saves the conversion and the memory traffic.
     @Published var captureYUV420: Bool { didSet { save(captureYUV420, "captureYUV420") } }
+
+    /// Spend latency on picture instead of on responsiveness.
+    ///
+    /// A desktop you are driving wants the encoder to hand every frame back
+    /// immediately, because the delay is between your hand and the pointer. A
+    /// film does not care: nothing is waiting on your input, and a quarter of
+    /// a second of extra delay buys a much better picture on exactly the
+    /// content -- fast motion, film grain, whole-frame changes -- that the
+    /// desktop tuning handles worst.
+    ///
+    /// So this raises the bitrate, loosens the burst cap that otherwise turns
+    /// a cut into a second of blocks, and lets the encoder hold a few frames to
+    /// look ahead. All four are settable on a live session, so it is a switch
+    /// you flip while watching, not a restart.
+    @Published var videoMode: Bool { didSet { save(videoMode, "videoMode") } }
+    /// The bitrate used while Video mode is on. Separate from the everyday one
+    /// so turning the mode off puts the desktop back exactly as it was.
+    @Published var videoBitrateMbps: Double {
+        didSet { save(videoBitrateMbps, "videoBitrateMbps") }
+    }
 
     /// Send the pointer separately and let the client draw it, rather than
     /// letting ScreenCaptureKit burn it into the video. The pointer then lags by
@@ -147,8 +163,9 @@ final class StreamSettings: ObservableObject {
         clientMACAddress = d.string(forKey: "ls.clientMACAddress") ?? ""
         stopOnSleep = d.object(forKey: "ls.stopOnSleep") as? Bool ?? true
         preventAppNap = d.object(forKey: "ls.preventAppNap") as? Bool ?? true
-        lowLatencyEncoder = d.object(forKey: "ls.lowLatencyEncoder") as? Bool ?? true
         captureYUV420 = d.object(forKey: "ls.captureYUV420") as? Bool ?? true
+        videoMode = d.object(forKey: "ls.videoMode") as? Bool ?? false
+        videoBitrateMbps = dbl("videoBitrateMbps", 60)
         forwardCursor = d.object(forKey: "ls.forwardCursor") as? Bool ?? true
         audioEnabled = d.object(forKey: "ls.audioEnabled") as? Bool ?? false
         audioVolume = d.object(forKey: "ls.audioVolume") as? Double ?? 0.8
@@ -158,6 +175,7 @@ final class StreamSettings: ObservableObject {
     }
 
     var bitrateBitsPerSecond: Int { Int(bitrateMbps * 1_000_000) }
+    var videoBitrateBitsPerSecond: Int { Int(videoBitrateMbps * 1_000_000) }
 
     /// The volume as the wire carries it: thousandths, clamped to unity.
     var audioVolumeThousandths: UInt16 {

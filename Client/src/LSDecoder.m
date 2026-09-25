@@ -65,6 +65,10 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
 
     double _decodeMicrosAverage;
     mach_timebase_info_data_t _timebase;
+    /// A decoder that has gone wrong goes wrong on every frame, and NSLog at
+    /// 60 Hz on this hardware is its own problem. First failure, then one line
+    /// per 300, so the record survives without becoming the bottleneck.
+    uint32_t _decodeFailures;
 }
 
 - (id)init {
@@ -313,7 +317,10 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
     if ((uint32_t)micros > _decodeMicrosecondsPeak) _decodeMicrosecondsPeak = (uint32_t)micros;
 
     if (status != noErr) {
-        NSLog(@"[LanScreen] decode failed (%d)", (int)status);
+        if (_decodeFailures++ % 300 == 0) {
+            NSLog(@"[LanScreen] decode failed (%d) (%u so far)",
+                  (int)status, _decodeFailures);
+        }
         // A decoder that has lost its reference state needs a clean restart.
         if (status == kVTInvalidSessionErr) {
             [self teardownSession];

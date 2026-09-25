@@ -71,10 +71,10 @@ rm -f "$SNAPSHOT"
     -snapshot "$SNAPSHOT" -snapshotAfter 40 > "$OUT/client.log" 2>&1 &
 CLIENT=$!
 sleep 1.5
-# "greedy": 4:2:0 capture into the low-latency rate controller, matching what
+# "shipping": 4:2:0 capture, matching what
 # the host now does. The colour path differs from BGRA, so testing the old one
 # would prove nothing about what actually ships.
-"$OUT/lsloopsend" 127.0.0.1 "$PORT" 200 60 bars "${PIPELINE:-greedy}" > /dev/null 2>&1
+"$OUT/lsloopsend" 127.0.0.1 "$PORT" 200 60 bars "${PIPELINE:-shipping}" > /dev/null 2>&1
 wait $CLIENT 2>/dev/null || true
 
 tail -1 "$OUT/client.log"

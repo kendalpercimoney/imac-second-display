@@ -51,7 +51,13 @@ func convertTo420v(_ source: CVPixelBuffer) -> CVPixelBuffer {
 
 let width = Int(ProcessInfo.processInfo.environment["EL_WIDTH"] ?? "1920") ?? 1920
 let height = Int(ProcessInfo.processInfo.environment["EL_HEIGHT"] ?? "1080") ?? 1080
-let frames = Int(ProcessInfo.processInfo.environment["EL_FRAMES"] ?? "150") ?? 150
+// 400, and not fewer. A shorter run does not merely add noise, it reverses the
+// answer: over 150 frames every configuration here measures about 9.5 ms and
+// the low-latency rate controller looks like it does nothing at all. Over 400
+// the same binary reports 14.6 ms without it against 9.4 ms with, every round.
+// Whatever the non-low-latency encoder is doing, it takes a few seconds of
+// steady feeding to start doing it, and a short run stops before it has.
+let frames = Int(ProcessInfo.processInfo.environment["EL_FRAMES"] ?? "400") ?? 400
 
 /// Moving content, so the encoder has real work to do rather than emitting
 /// near-empty inter frames that would flatter the timings.
@@ -86,7 +92,8 @@ let sources420v = sources.map(convertTo420v)
 
 func trial(_ label: String, feedFPS: Int, lowLatency: Bool,
            expectedFrameRateOverride: Int?, keyframeInterval: Double = 5.0,
-           use420v: Bool = false) {
+           use420v: Bool = false,
+           realTime: Bool = false, maxFrameDelayCount: Int = 0) {
     let feed = use420v ? sources420v : sources
     let lock = NSLock()
     var submitted: [Int: UInt64] = [:]
@@ -101,6 +108,8 @@ func trial(_ label: String, feedFPS: Int, lowLatency: Bool,
         profileIsBaseline: true, keyframeInterval: keyframeInterval,
         prioritizeSpeed: false, dataRateLimitMultiplier: 4.0,
         lowLatencyRateControl: lowLatency,
+        realTime: realTime,
+        maxFrameDelayCount: maxFrameDelayCount,
         expectedFrameRateOverride: expectedFrameRateOverride)) { sampleBuffer in
 
         let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
@@ -160,20 +169,33 @@ if ProcessInfo.processInfo.environment["EL_KEYFRAMES"] != nil {
     // loses its place has only the on-demand request to fall back on.
     print("\nKeyframes over \(frames) frames at 60 fps with a 2-second interval")
     print("(expect roughly one per 120 frames if the interval is honoured)\n")
-    trial("as shipped", feedFPS: 60, lowLatency: false,
-          expectedFrameRateOverride: nil, keyframeInterval: 2.0)
+    trial("as shipped (not real time)", feedFPS: 60, lowLatency: false,
+          expectedFrameRateOverride: nil, keyframeInterval: 2.0, realTime: false)
+    trial("real time", feedFPS: 60, lowLatency: false,
+          expectedFrameRateOverride: nil, keyframeInterval: 2.0, realTime: true)
     trial("low-latency rate control", feedFPS: 60, lowLatency: true,
-          expectedFrameRateOverride: nil, keyframeInterval: 2.0)
+          expectedFrameRateOverride: nil, keyframeInterval: 2.0, realTime: true)
 } else {
     print("\nHow long VideoToolbox holds a frame, \(width)x\(height), \(frames) frames\n")
     for round in 1...3 {
         print("round \(round)")
-        trial("  fed 60, as shipped", feedFPS: 60, lowLatency: false, expectedFrameRateOverride: nil)
-        trial("  fed 60, ExpectedFrameRate 120", feedFPS: 60, lowLatency: false, expectedFrameRateOverride: 120)
-        trial("  fed 60, low-latency rate control", feedFPS: 60, lowLatency: true, expectedFrameRateOverride: nil)
-        trial("  fed 60, 420v input", feedFPS: 60, lowLatency: false,
-              expectedFrameRateOverride: nil, use420v: true)
-        trial("  fed 60, low-latency + 420v", feedFPS: 60, lowLatency: true,
-              expectedFrameRateOverride: nil, use420v: true)
+        // Every row names both properties, because "as shipped" moved once
+        // already and a table whose baseline drifts is worse than no table.
+        trial("  real time, holds nothing", feedFPS: 60, lowLatency: false,
+              expectedFrameRateOverride: nil, realTime: true)
+        trial("  real time, ExpectedFrameRate 120", feedFPS: 60, lowLatency: false,
+              expectedFrameRateOverride: 120, realTime: true)
+        trial("  real time, 420v input", feedFPS: 60, lowLatency: false,
+              expectedFrameRateOverride: nil, use420v: true, realTime: true)
+        trial("  real time, holds 4", feedFPS: 60, lowLatency: false,
+              expectedFrameRateOverride: nil, realTime: true, maxFrameDelayCount: 4)
+        trial("  low-latency rate control", feedFPS: 60, lowLatency: true,
+              expectedFrameRateOverride: nil, realTime: true)
+        trial("  low-latency + 420v", feedFPS: 60, lowLatency: true,
+              expectedFrameRateOverride: nil, use420v: true, realTime: true)
+        trial("  AS SHIPPED: not real time, holds nothing", feedFPS: 60,
+              lowLatency: false, expectedFrameRateOverride: nil, realTime: false)
+        trial("  not real time, holds 4", feedFPS: 60, lowLatency: false,
+              expectedFrameRateOverride: nil, realTime: false, maxFrameDelayCount: 4)
     }
 }

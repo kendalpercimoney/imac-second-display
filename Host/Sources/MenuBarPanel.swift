@@ -43,6 +43,7 @@ struct MenuBarPanel: View {
             VStack(spacing: 9) {
                 startButton
                 meters
+                pictureGroup
                 linkGroup
                 audioGroup
                 screenGroup
@@ -167,7 +168,7 @@ struct MenuBarPanel: View {
             VStack(spacing: 5) {
                 Aero.Meter(label: "Sending",
                            value: String(format: "%.1f Mb/s", controller.outgoingMbps),
-                           fraction: controller.outgoingMbps / max(settings.bitrateMbps, 1),
+                           fraction: controller.outgoingMbps / max(controller.activeBitrateMbps, 1),
                            colour: Aero.green, live: controller.isRunning)
                 Aero.Meter(label: "Encoding",
                            value: String(format: "%.0f fps", controller.encodedFPS),
@@ -249,6 +250,40 @@ struct MenuBarPanel: View {
                 .lineLimit(1)
         }
         .frame(width: 104, alignment: .leading)
+    }
+
+    // MARK: - Picture
+
+    /// The one control meant to be reached for mid-stream. The bitrate is
+    /// settable on a live encoder session, so it takes effect on the next
+    /// frame rather than restarting anything.
+    private var pictureGroup: some View {
+        Aero.Group(title: "Picture", accent: Aero.violet) {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Video mode", isOn: $settings.videoMode)
+                    .onChange(of: settings.videoMode) { _ in
+                        controller.applyEncoderModeNow()
+                    }
+
+                HStack(spacing: 7) {
+                    Image(systemName: "film")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Aero.inkFaint)
+                        .frame(width: 14)
+                    Slider(value: $settings.videoBitrateMbps, in: 20...120, step: 5)
+                    Text("\(Int(settings.videoBitrateMbps)) Mb/s")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Aero.ink)
+                        .frame(width: 58, alignment: .trailing)
+                }
+                .disabled(!settings.videoMode)
+                .opacity(settings.videoMode ? 1 : 0.5)
+                .onChange(of: settings.videoBitrateMbps) { _ in
+                    controller.applyEncoderModeNow()
+                }
+
+            }
+        }
     }
 
     // MARK: - Audio
@@ -352,15 +387,11 @@ struct MenuBarPanel: View {
         controller.client.hasSaidHello && !controller.client.setsBrightness
     }
 
-    // MARK: - The three switches worth reaching for
+    // MARK: - The switches worth reaching for
 
     private var switchesGroup: some View {
         Aero.Group(title: "Responsiveness", accent: Aero.amber) {
             VStack(alignment: .leading, spacing: 6) {
-                Toggle("Low-latency encoder, 4:2:0 capture", isOn: Binding(
-                    get: { settings.lowLatencyEncoder && settings.captureYUV420 },
-                    set: { settings.lowLatencyEncoder = $0; settings.captureYUV420 = $0 }))
-                    .disabled(controller.isRunning)
                 Toggle("Send the pointer separately", isOn: $settings.forwardCursor)
                     .disabled(controller.isRunning)
                 Toggle("Keep this Mac at full performance", isOn: $settings.preventAppNap)

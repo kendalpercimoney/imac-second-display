@@ -87,6 +87,9 @@ final class StreamController: ObservableObject {
     /// on-demand keyframe always re-encodes what is actually on screen.
     private var lastCapturedBuffer: CVPixelBuffer?
     private var lastEncodeSubmitTime: TimeInterval = 0
+    /// What the outgoing interface reported when the stream started, kept so a
+    /// plan can be rebuilt mid-stream without asking the socket again.
+    private var startedWithLinkMTU: Int?
     private var forceKeyframeFlag = false
     private var sdpWritten = false
     /// When the current stream started, so the log lines carry an elapsed time
@@ -256,8 +259,10 @@ final class StreamController: ObservableObject {
                     self.startedAt = Date()
                     self.isRunning = true
                     self.statusText = "Streaming to \(self.settings.clientAddress):\(self.settings.videoPort)"
-                    StreamController.statsLog.notice(
-                        "stream started \(self.settings.width, privacy: .public)x\(self.settings.height, privacy: .public) @ \(self.settings.frameRate, privacy: .public), \(self.settings.bitrateMbps, format: .fixed(precision: 0), privacy: .public) Mb/s")
+                    if StreamController.logsProgress {
+                        StreamController.statsLog.notice(
+                            "stream started \(self.settings.width, privacy: .public)x\(self.settings.height, privacy: .public) @ \(self.settings.frameRate, privacy: .public), \(self.activeBitrateMbps, format: .fixed(precision: 0), privacy: .public) Mb/s")
+                    }
                 }
             } catch {
                 await teardown()
@@ -278,8 +283,10 @@ final class StreamController: ObservableObject {
         Task {
             await teardown()
             onMain {
-                StreamController.statsLog.notice(
-                    "stream stopped after \(Int(Date().timeIntervalSince(self.startedAt ?? Date())), privacy: .public)s")
+                if StreamController.logsProgress {
+                    StreamController.statsLog.notice(
+                        "stream stopped after \(Int(Date().timeIntervalSince(self.startedAt ?? Date())), privacy: .public)s")
+                }
                 self.startedAt = nil
                 self.isRunning = false
                 self.statusText = "Idle"
@@ -305,10 +312,10 @@ final class StreamController: ObservableObject {
                                    port: UInt16(settings.videoPort))
 
         // Jumbo frames are a setting here but a property of the cable, the
-        // adapter and both machines. A manually raised MTU does not survive a
-        // reboot, so a setting that was right yesterday can be wrong today with
-        // nothing to show for it except a stream that slowly falls apart. Check
-        // rather than assume, and carry on with what the link can actually take.
+        // adapter and both machines, and a manually raised MTU does not outlive
+        // a reboot. So a setting that was right yesterday can be wrong today
+        // with nothing to show for it but a stream that slowly falls apart.
+        // Check rather than assume, and carry on with what the link can take.
         let requestedPayload = settings.mtuPayload
         let linkMTU = sender.linkMTU
         let plan = StreamPlan(settings: settings, linkMTU: linkMTU,
@@ -319,11 +326,11 @@ final class StreamController: ObservableObject {
         var pathWarnings: [String] = []
         if let mtu = linkMTU, effectivePayload != requestedPayload {
             pathWarnings.append(
-                "Packet size \(requestedPayload) B needs an MTU of "
-                + "\(requestedPayload + lsIPv4UDPOverhead); the link to \(settings.clientAddress) "
-                + "is \(mtu). Using \(effectivePayload) B. For jumbo frames set MTU 9000 on "
-                + "both ends — it does not survive a reboot.")
+                "Packet size \(requestedPayload) B needs MTU "
+                + "\(requestedPayload + lsIPv4UDPOverhead); the link is \(mtu). "
+                + "Using \(effectivePayload) B.")
         }
+        startedWithLinkMTU = linkMTU
         onMain {
             self.plan = plan
             self.linkMTUBytes = linkMTU ?? 0
@@ -333,7 +340,7 @@ final class StreamController: ObservableObject {
             // exactly the warning you still want to have seen.
             self.warnings = pathWarnings
         }
-        if let mtu = linkMTU {
+        if let mtu = linkMTU, StreamController.logsProgress {
             StreamController.statsLog.notice(
                 "link mtu=\(mtu, privacy: .public) requested payload=\(requestedPayload, privacy: .public) using=\(effectivePayload, privacy: .public)")
         }
@@ -375,8 +382,7 @@ final class StreamController: ObservableObject {
             frameRate: plan.frameRate,
             bitrate: plan.bitrateBitsPerSecond,
             profileIsBaseline: plan.profile != .main,
-            keyframeInterval: plan.keyframeSeconds,
-            lowLatencyRateControl: plan.lowLatencyRateControl)
+            keyframeInterval: plan.keyframeSeconds)
 
         let encoder = VideoEncoder(config: encoderConfig) { [weak self] sampleBuffer in
             // VideoToolbox serializes output callbacks per session, so the
@@ -633,6 +639,39 @@ final class StreamController: ObservableObject {
     /// Kept for the volume slider's own call site.
     func sendVolumeNow() { sendClientSettingsNow() }
 
+    /// Retune the running encoder for the current mode.
+    ///
+    /// The bitrate is settable on a live compression session and does not
+    /// alter the SPS, so the switch takes effect on the next frame and the
+    /// client -- which already has the parameter sets -- never notices anything
+    /// happened beyond the picture getting better.
+    ///
+    /// The plan is rebuilt rather than patched, so the mode goes through the
+    /// same one place every other setting does and the UI's greying stays
+    /// truthful.
+    func applyEncoderModeNow() {
+        guard isRunning else { return }
+        let rebuilt = StreamPlan(settings: settings,
+                                 linkMTU: startedWithLinkMTU,
+                                 clientPlaysAudio: client.hasSaidHello ? client.playsAudio : nil,
+                                 clientSetsBrightness: client.hasSaidHello
+                                     ? client.setsBrightness : nil)
+        onMain { self.plan = rebuilt }
+        encodeQueue.async { [weak self] in
+            guard let self, let encoder = self.encoder else { return }
+            encoder.updateBitrate(rebuilt.bitrateBitsPerSecond)
+        }
+    }
+
+    /// The bitrate the running stream is actually using, for the meter to
+    /// scale against. Falls back to what the settings would produce before a
+    /// stream exists.
+    var activeBitrateMbps: Double {
+        Double(plan?.bitrateBitsPerSecond
+               ?? (settings.videoMode ? settings.videoBitrateBitsPerSecond
+                                      : settings.bitrateBitsPerSecond)) / 1_000_000
+    }
+
     private func startIdleHeartbeat() {
         let timer = DispatchSource.makeTimerSource(queue: encodeQueue)
         timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
@@ -704,8 +743,16 @@ final class StreamController: ObservableObject {
     /// the app keeps a history otherwise, and by the time you notice a
     /// degradation the numbers that would explain it are gone.
     ///
-    ///     log show --predicate 'subsystem == "com.lanscreen.host"' --last 15m
+    ///     LS_LOG=1 open -a LanScreenHost
     ///     log stream --predicate 'subsystem == "com.lanscreen.host"'
+    ///     log show --predicate 'subsystem == "com.lanscreen.host"' --last 15m
+    ///
+    /// Off unless `LS_LOG` is set. Not because it was expensive -- this exact
+    /// line with all fifteen of its interpolations measured 2.16 us, which once
+    /// a second is 0.0002% of one core, and the whole running commentary is not
+    /// detectable in any number this app reports. It is off because a stream
+    /// that is behaving does not need a diary, and turning it on is one word on
+    /// the command line when one is wanted.
     ///
     /// At `notice`, not `info`. Info-level messages live in a memory ring
     /// buffer and are evicted, so the first version of this had already lost
@@ -713,7 +760,7 @@ final class StreamController: ObservableObject {
     /// packet size was chosen — by the time anyone came to read it. Which is
     /// the one thing a record of what happened must not do.
     private func logStatsLine() {
-        guard isRunning else { return }
+        guard isRunning, StreamController.logsProgress else { return }
         let uptime = Int(Date().timeIntervalSince(startedAt ?? Date()))
         StreamController.statsLog.notice("""
             t=\(uptime, privacy: .public)s \
@@ -736,6 +783,15 @@ final class StreamController: ObservableObject {
     }
 
     static let statsLog = Logger(subsystem: "com.lanscreen.host", category: "stats")
+
+    /// Whether to keep a running commentary. Read once: an environment
+    /// variable cannot change under a running process, and this is consulted
+    /// on a path that runs every second.
+    ///
+    /// Errors are not covered by this. A failure that is never written down is
+    /// a failure nobody can explain afterwards, and those cost nothing because
+    /// they do not happen.
+    static let logsProgress = ProcessInfo.processInfo.environment["LS_LOG"] != nil
 
     // MARK: - SDP, for testing with VLC/ffplay before touching the iMac
 

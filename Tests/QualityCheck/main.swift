@@ -33,7 +33,10 @@ import VideoToolbox
 
 let width = Int(ProcessInfo.processInfo.environment["QC_WIDTH"] ?? "1280") ?? 1280
 let height = Int(ProcessInfo.processInfo.environment["QC_HEIGHT"] ?? "720") ?? 720
-let frameCount = 90
+// 400 by default, for the same reason EncoderLatency uses 400: a short run
+// stops before the encoder reaches steady state, and the answer it gives
+// before then is not a noisier version of the real one, it is a different one.
+let frameCount = Int(ProcessInfo.processInfo.environment["QC_FRAMES"] ?? "400") ?? 400
 let fps = Int(ProcessInfo.processInfo.environment["QC_FPS"] ?? "60") ?? 60
 
 // ------------------------------------------------------------ source frames --
@@ -84,7 +87,14 @@ func zoomFrame(_ index: Int) -> CVPixelBuffer {
     let stride = CVPixelBufferGetBytesPerRow(pixelBuffer)
     let out = CVPixelBufferGetBaseAddress(pixelBuffer)!.assumingMemoryBound(to: UInt8.self)
 
-    let zoom = 1.0 + 1.6 * Double(index) / Double(frameCount)
+    // A fixed rate per frame, reversing at the ends, rather than a zoom
+    // stretched across however many frames the run happens to have. Otherwise
+    // a longer run is a slower zoom, which is easier content, and the frame
+    // count quietly becomes a difficulty setting -- so two runs of different
+    // lengths could not be compared with each other at all.
+    let span = 90.0
+    let phase = Double(index).truncatingRemainder(dividingBy: 2 * span)
+    let zoom = 1.0 + 1.6 * (phase <= span ? phase : 2 * span - phase) / span
     let cropW = Double(width) / zoom, cropH = Double(height) / zoom
     let originX = (Double(width) - cropW) / 2, originY = (Double(height) - cropH) / 2
 
@@ -144,7 +154,8 @@ final class Run {
 
 func trial(_ label: String, bitrate: Int, keyframeInterval: Double,
            prioritizeSpeed: Bool, dataRateLimitMultiplier: Double?,
-           lowLatency: Bool = false) {
+           lowLatency: Bool = false,
+           realTime: Bool = true, maxFrameDelayCount: Int = 0) {
     let run = Run()
     let done = DispatchSemaphore(value: 0)
     var seen = 0
@@ -154,7 +165,9 @@ func trial(_ label: String, bitrate: Int, keyframeInterval: Double,
         profileIsBaseline: true, keyframeInterval: keyframeInterval,
         prioritizeSpeed: prioritizeSpeed,
         dataRateLimitMultiplier: dataRateLimitMultiplier,
-        lowLatencyRateControl: lowLatency)) { sampleBuffer in
+        lowLatencyRateControl: lowLatency,
+        realTime: realTime,
+        maxFrameDelayCount: maxFrameDelayCount)) { sampleBuffer in
 
         if let block = CMSampleBufferGetDataBuffer(sampleBuffer) {
             run.bytes += CMBlockBufferGetDataLength(block)
@@ -205,11 +218,59 @@ func trial(_ label: String, bitrate: Int, keyframeInterval: Double,
                  label as NSString, mean, scores.first ?? 0, mbps))
 }
 
-print("\nZooming into a detailed image at \(width)x\(height)/\(fps), 25 Mb/s\n")
-trial("current defaults", bitrate: 25_000_000, keyframeInterval: 5.0,
+print("\nZooming into a detailed image at \(width)x\(height)/\(fps)\n")
+trial("desktop tuning, 25 Mb/s", bitrate: 25_000_000, keyframeInterval: 5.0,
       prioritizeSpeed: false, dataRateLimitMultiplier: 4.0)
 trial("low-latency rate control (Constrained Baseline)", bitrate: 25_000_000,
       keyframeInterval: 5.0, prioritizeSpeed: false, dataRateLimitMultiplier: 4.0,
       lowLatency: true)
-trial("low-latency at 40 Mb/s", bitrate: 40_000_000, keyframeInterval: 5.0,
-      prioritizeSpeed: false, dataRateLimitMultiplier: 4.0, lowLatency: true)
+
+// What the Video mode switch is worth, and how much of it is simply the
+// bitrate. If the last two lines come out the same, the encoder tuning is
+// doing nothing and the switch should just move the bitrate slider.
+// Which of the three encoder tunings is actually best, at the same bitrate.
+// The look-ahead row is the interesting one: EncoderLatency reports it as the
+// fastest of the three, which is not what asking an encoder to look ahead is
+// supposed to do, so what it costs in picture is the thing to know.
+print("\nThe three tunings at the same bitrate\n")
+for rate in [12_000_000, 25_000_000] {
+    let mb = rate / 1_000_000
+    trial("\(mb) Mb/s, real time, holds nothing", bitrate: rate,
+          keyframeInterval: 5.0, prioritizeSpeed: false, dataRateLimitMultiplier: 4.0)
+    trial("\(mb) Mb/s, low-latency rate control", bitrate: rate,
+          keyframeInterval: 5.0, prioritizeSpeed: false, dataRateLimitMultiplier: 4.0,
+          lowLatency: true)
+    trial("\(mb) Mb/s, not real time, holds 4", bitrate: rate,
+          keyframeInterval: 5.0, prioritizeSpeed: false, dataRateLimitMultiplier: 4.0,
+          realTime: false, maxFrameDelayCount: 4)
+}
+
+print("\nVideo mode, taken apart\n")
+trial("desktop tuning at the video bitrate", bitrate: 60_000_000,
+      keyframeInterval: 5.0, prioritizeSpeed: false, dataRateLimitMultiplier: 4.0)
+trial("video mode (60 Mb/s, 8x burst, look-ahead)", bitrate: 60_000_000,
+      keyframeInterval: 5.0, prioritizeSpeed: false, dataRateLimitMultiplier: 8.0,
+      realTime: false, maxFrameDelayCount: 4)
+
+// The pair above is quality-saturated -- 60 Mb/s at this size is more than the
+// picture needs, so nothing the rate controller does can show up. Repeat the
+// comparison where the encoder actually has to choose what to spend bits on,
+// which is the only place look-ahead and a loose burst cap could earn anything.
+print("\nWhether the burst cap costs anything on a keyframe\n")
+// The runs above score a continuous zoom with a single keyframe they skip, so
+// the cap is never exercised. Here one lands every second and the worst frame
+// is the one right after it.
+for multiplier in [2.0, 4.0, 8.0, 16.0] {
+    trial("burst cap \(Int(multiplier))x, keyframe every second", bitrate: 12_000_000,
+          keyframeInterval: 1.0, prioritizeSpeed: false,
+          dataRateLimitMultiplier: multiplier)
+}
+
+print("\nThe same tuning where the bitrate is tight\n")
+for rate in [6_000_000, 12_000_000] {
+    trial("\(rate / 1_000_000) Mb/s, desktop tuning", bitrate: rate,
+          keyframeInterval: 5.0, prioritizeSpeed: false, dataRateLimitMultiplier: 4.0)
+    trial("\(rate / 1_000_000) Mb/s, video tuning", bitrate: rate,
+          keyframeInterval: 5.0, prioritizeSpeed: false, dataRateLimitMultiplier: 8.0,
+          realTime: false, maxFrameDelayCount: 4)
+}

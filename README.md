@@ -1,8 +1,7 @@
 # LanScreen Greedy
 
 A variant of [LanScreen](https://github.com/kendalpercimoney/imac-second-display)
-tuned hard for responsiveness, at some cost in picture quality and one visible
-behavioural trade-off.
+tuned hard for responsiveness, with one visible behavioural trade-off.
 
 **The client must be rebuilt.** The wire protocol gained pointer messages and a
 capability flag, and an older client paired with this host would show no pointer
@@ -10,8 +9,10 @@ at all. The host warns you if that happens rather than leaving you to notice.
 
 ## What is different, and what it bought
 
-Everything below was measured on an M1 Pro before being kept. Two suggestions
-that sounded reasonable were measured and dropped.
+Everything below was measured on an M1 Pro before being kept. Several
+suggestions that sounded reasonable were measured and dropped, and two settings
+that had been on since the beginning turned out to be the largest single cost in
+the pipeline.
 
 ### The pointer is drawn by the client
 
@@ -28,37 +29,69 @@ the change you actually feel. VNC has done it for the same reason for decades.
 ahead of a window you are dragging, because the window moves with the video and
 the pointer does not.
 
-### Low-latency rate control, and capturing in 4:2:0
+### Capturing in 4:2:0, and two settings that were costing 5 ms each
 
-VideoToolbox's `EnableLowLatencyRateControl` with `ScreenCaptureKit` handing over
-`420v` instead of BGRA, so the encoder is never converting a frame before it can
-start.
+`ScreenCaptureKit` hands over `420v` instead of BGRA, so the encoder is never
+converting a frame before it can start. That part was always right.
 
-Measured as how long the encoder holds a frame, 1080p, 400 frames, three rounds:
+The other two were not, and both had been on since the beginning: VideoToolbox's
+`EnableLowLatencyRateControl`, and `kVTCompressionPropertyKey_RealTime`. Between
+them they were costing **5.4 ms of the 13.5 ms** this pipeline took.
 
-| | mean hold | p95 |
-|---|---|---|
-| as the original ships | ~16 ms | 21–36 ms |
-| 4:2:0 alone | ~15 ms | 19–23 ms |
-| low-latency alone | ~9.9 ms | 13–15 ms |
-| **both together** | **~9.2 ms** | **9.9–13.2 ms** |
+They hid behind each other. The low-latency rate controller is in charge of
+timing when it is on, so `RealTime` makes no difference while it is enabled —
+and measuring the two together, which is what had always been done, shows
+neither. Four hundred frames through the loopback harness, interleaved, three
+rounds, mean capture-to-decoded-frame:
 
-4:2:0 on its own does nothing. It only pays off combined with the low-latency
-rate controller.
+| | mean | median | p95 | min |
+|---|---|---|---|---|
+| **4:2:0, neither** | **8.04–8.13 ms** | 7.7–7.9 | 11.3–12.4 | **5.1** |
+| BGRA, neither | 8.70–8.82 ms | 8.4–8.6 | 12.3–12.8 | 5.8 |
+| 4:2:0 + real time | 13.00–13.43 ms | 12.7–13.1 | 16.9–17.4 | 10.3 |
+| 4:2:0 + low latency | 13.46–13.55 ms | 13.3–13.5 | 16.8–17.3 | 10.2 |
+| BGRA + low latency | 14.15–14.39 ms | 14.0–14.2 | 18.2–18.5 | 11.2 |
 
-End to end over the loopback harness, four interleaved pairs of 300 frames:
+No overlap in any statistic in any round, including the minimum, which has no
+noise in it at all. 4:2:0 is worth about 0.7 ms on top.
 
-| | median | p95 | mean |
-|---|---|---|---|
-| original pipeline | ~12.1 ms | **~40 ms** | ~17.1 ms |
-| greedy pipeline | ~10.4 ms | **~20 ms** | ~11.8 ms |
+`RealTime = true` does not make the encoder hurry; it appears to make
+VideoToolbox pace delivery to the frame duration. The signature is that with it
+on, the median hold (17.9 ms) is *higher* than the mean (14.9) — a queue being
+fed out on a clock rather than emptied.
 
-The median barely moves. **The tail halves**, and the tail is what reads as
-stutter.
+**`Tests/EncoderLatency` says the opposite about the low-latency rate
+controller**, and that is where the original belief came from: 9.4 ms of hold
+time against 14.5. It measures submit-to-callback on a batch fed as fast as it
+will go, which turns out not to be the same quantity as latency. The loopback
+harness times the real pipeline and disagrees by 5 ms. Where they conflict, the
+one that measures the whole path wins.
 
-Costs about half a decibel of PSNR on hard content (39.9 dB against 40.5 dB on a
-1080p zoom), though the worst single frame is slightly better. It forces
-Constrained Baseline, a subset of the Baseline the iMac already decodes.
+Turning the low-latency rate controller off also gets the full requested bitrate
+back (it was undershooting ~1%), restores Baseline in place of Constrained
+Baseline, and returns 0.2 dB of mean PSNR. It was better at exactly one thing:
+the single worst frame, 33.6 dB against 32.1.
+
+### Video mode
+
+One switch in the panel, meant to be reached for mid-stream: it swaps the
+everyday bitrate for a higher one kept separately, so turning it off puts the
+desktop back exactly as it was. 25 to 60 Mb/s is +3.3 dB at 1080p on hard
+content. The bitrate is settable on a live compression session and does not
+change the SPS, so it takes effect on the next frame and the iMac never notices
+anything happened.
+
+**It costs no latency**, which is not what was intended. It was going to spend
+some: let the encoder hold frames to look ahead, loosen the burst cap so a cut
+is not rationed out over the following second. Neither survived measurement.
+`MaxFrameDelayCount` does nothing whatsoever on this encoder — 4 measures
+14.98 ms against 14.93 for 0 — and loosening the burst cap from 4x to 16x bought
+0.05 dB on the worst frame while spending 4% more bitrate for it. There was no
+latency here worth buying anything with.
+
+B-frames are the one real lever left, and they are refused deliberately: the
+client decodes synchronously and draws whatever comes out, so it has no way to
+put decode order back into display order.
 
 ### Audio, uncompressed and on its own socket
 
@@ -305,9 +338,12 @@ otherwise leave the iMac at a setting nobody chose.
 
 ### Measured and rejected
 
-- **`ExpectedFrameRate` of 120 while feeding 60.** Improves the mean about as
-  much as low-latency mode does, but leaves the p95 at 18–20 ms rather than
-  13–15. No reason to prefer it, and no benefit stacking it.
+- **`ExpectedFrameRate` of 120 while feeding 60.** Takes the encoder's hold
+  time from 14.5 ms to 10.3, but leaves the p95 at 18–19 ms rather than the 12
+  that simply turning `RealTime` off gives. Nothing to prefer about it.
+- **Letting the encoder hold frames to look ahead**, the textbook way to spend
+  latency on picture. `MaxFrameDelayCount` changes nothing measurable in either
+  direction on this hardware.
 - **A 120 Hz virtual display.** The claim that feeding faster reduces latency
   does not survive direct measurement: the encoder's hold time is ~10 ms whether
   fed at 60 or 120. The original README said otherwise, and it was wrong —
@@ -411,17 +447,28 @@ uses the smaller of that and the configured size. It says so in the panel and in
 the log rather than changing the saved setting, so restoring MTU 9000 on both
 ends brings jumbo frames back on its own.
 
+Start the host with `LS_LOG=1` and it also writes a line a second of throughput,
+latency, loss and keyframe counts, because nothing else keeps a history and by
+the time you notice a degradation the numbers that would explain it are gone:
+
+    LS_LOG=1 open -a LanScreenHost
     log show --predicate 'subsystem == "com.lanscreen.host"' --last 15m
 
-is also where a line a second of throughput, latency, loss and keyframe counts
-now goes, because nothing kept a history and by the time you notice a
-degradation the numbers that would explain it are gone.
+Off by default, and not because it was expensive: that line, with all fifteen of
+its interpolations, measures 2.16 µs, which once a second is 0.0002% of one
+core. It is off because a stream that is behaving does not need a diary. Errors
+are written down either way.
 
 Those lines are logged at `notice`, not `info`, which took a second attempt to
 get right. Info-level messages live in a memory ring buffer and are evicted, so
 the first version had already lost the opening ninety seconds of a stream — the
 part that says what packet size was chosen — before anyone came to read it, and
 the `log show` command written here returned nothing at all.
+
+On the client, the two log lines that sit on a per-frame path — a failed decode
+and a failed texture upload — print the first occurrence and then one per 300.
+`NSLog` sixty times a second on a 2010 iMac is a second fault on top of the
+first one.
 
 **One thing still fragments, and it is fine.** The packet-size clamp applies to
 the video. Cursor bitmaps go over the control channel as a single datagram of up
@@ -474,18 +521,23 @@ returns nothing for one created a moment ago, which reads as 0x0 and looks like
 a failure rather than a race.
 
 **The Profile picker did nothing** whenever the low-latency encoder was on,
-which is the default. VideoToolbox's low-latency rate controller only offers
+which was the default. VideoToolbox's low-latency rate controller only offers
 Constrained Baseline, so asking for Main did not fail — it was simply not what
-you got.
+you got. That one has since fixed itself: the low-latency rate controller is
+gone, measured as costing 5 ms, and the picker means what it says again.
 
-**Include mouse cursor did nothing** whenever the pointer was being sent
-separately, which is also the default, because the pointer must not be in the
-video as well as beside it.
+**Include mouse cursor does nothing** whenever the pointer is being sent
+separately, which is the default, because the pointer must not be in the video
+as well as beside it.
 
-Both are still overridden, because both overrides are correct. What changed is
-that the overriding now happens in one place, `StreamPlan`, which records what
-it ignored and why — and the window greys those controls out and says so,
-instead of presenting a live-looking control and quietly discarding it.
+**The everyday Bitrate slider does nothing** while Video mode is on, which was
+caught by this machinery within minutes of Video mode existing rather than by
+someone dragging a slider and wondering.
+
+These are still overridden, because the overrides are correct. What changed is
+that the overriding happens in one place, `StreamPlan`, which records what it
+ignored and why — and the window greys those controls out and says so, instead
+of presenting a live-looking control and quietly discarding it.
 
 `./Tests/run_settings_audit.sh` flips every control in turn and requires that it
 either changes the plan the pipeline is built from, or is named as inert. A
@@ -507,9 +559,18 @@ payload to fit. Both halves were confirmed by breaking them: with the clamp
 disabled and with the interface lookup taking the first interface it sees, the
 test fails in each case.
 
-`./Tests/EncoderLatency` and `./Tests/QualityCheck` produced the numbers above,
-and `./Tests/run_loopback_test.sh` takes `PIPELINE=plain` to measure the
-original path for comparison.
+`./Tests/QualityCheck` produced the picture-quality numbers above, and
+`./Tests/run_loopback_test.sh` the latency ones. It takes `PIPELINE=` to pick
+what the encoder is configured with: `shipping` (the default), `greedy` for what
+this used to do, or `lowlatency` and `plain` to isolate the halves.
+
+`./Tests/EncoderLatency` measures the encoder on its own. Treat it as a hint,
+not as a verdict — it is where the belief that the low-latency rate controller
+was fast came from, and it was wrong by 5 ms. Both it and `QualityCheck` default
+to 400 frames now, because at 150 the encoder has not reached steady state and
+the answer is not a noisier version of the real one, it is a different one: over
+150 frames every configuration measures about 9.5 ms and the low-latency rate
+controller looks like it does nothing at all.
 
 ---
 

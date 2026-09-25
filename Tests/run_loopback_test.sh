@@ -118,6 +118,6 @@ MIN_FRAMES=$(( FRAMES - 12 ))
 "$OUT/lsloopreceive" "$PORT" "$MIN_FRAMES" 25 &
 RECEIVER=$!
 sleep 1
-"$OUT/lsloopsend" 127.0.0.1 "$PORT" "$FRAMES" "$FPS" motion "${PIPELINE:-greedy}"
+"$OUT/lsloopsend" 127.0.0.1 "$PORT" "$FRAMES" "$FPS" motion "${PIPELINE:-shipping}"
 
 wait $RECEIVER

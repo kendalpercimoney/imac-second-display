@@ -51,10 +51,18 @@ let fps = Int(arguments.count > 4 ? arguments[4] : "30") ?? 30
 // "motion" exercises the encoder with real detail; "bars" is a flat quadrant
 // pattern whose colours can be checked numerically after the round trip.
 let pattern = arguments.count > 5 ? arguments[5] : "motion"
-// "greedy" mirrors the host's settings: 4:2:0 capture into the low-latency
-// rate controller. The colour path differs from BGRA, so the render test has
-// to be run through this to mean anything.
-let greedy = (arguments.count > 6 ? arguments[6] : "") == "greedy"
+// What the encoder is configured with. "shipping" is what the host actually
+// does: 4:2:0 capture, no low-latency rate controller. The colour path differs
+// from BGRA, so the render and cursor tests have to run through a 4:2:0 mode
+// to mean anything.
+//
+// "greedy" is what the host used to do -- 4:2:0 into the low-latency rate
+// controller -- kept so the 5.4 ms that change was worth can be re-measured.
+// "lowlatency" and "plain" isolate the two halves, which is how it was found:
+// bundled, they could not say which half was responsible.
+let mode = arguments.count > 6 ? arguments[6] : "shipping"
+let useLowLatency = mode == "greedy" || mode == "lowlatency"
+let use420v = mode == "greedy" || mode == "shipping" || mode == "420v"
 
 let width = 1280, height = 720
 
@@ -128,7 +136,7 @@ let encoder = VideoEncoder(config: .init(width: width, height: height,
                                          bitrate: 12_000_000,
                                          profileIsBaseline: true,
                                          keyframeInterval: 1.0,
-                                         lowLatencyRateControl: greedy)) { sampleBuffer in
+                                         lowLatencyRateControl: useLowLatency)) { sampleBuffer in
     packetizer.packetize(sampleBuffer: sampleBuffer)
     emitted += 1
     if emitted >= frameCount { done.signal() }
@@ -142,7 +150,7 @@ if !encoder.warnings.isEmpty {
 // Generate up front: the pixel-filling loop below is plain Swift and slow, and
 // it has no business sitting inside the timed path.
 var frames = (0..<min(frameCount, 60)).map { makeFrame($0) }
-if greedy { frames = frames.map(convertTo420v) }
+if use420v { frames = frames.map(convertTo420v) }
 
 for index in 0..<frameCount {
     let pixelBuffer = frames[index % frames.count]

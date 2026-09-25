@@ -67,6 +67,10 @@
     NSString *_pendingSnapshotPath;
     BOOL _snapshotSucceeded;
     OSType _loggedUnsupportedFormat;
+    /// Failures here repeat every frame, so the log is throttled rather than
+    /// silenced: the first one, then one line per 300 after it. A fault that
+    /// prints sixty times a second on a 2010 iMac is a second fault.
+    uint32_t _texImageFailures;
     double _renderMicrosAverage;
     mach_timebase_info_data_t _timebase;
 }
@@ -94,6 +98,7 @@
         _stateLock = [[NSLock alloc] init];
         mach_timebase_info(&_timebase);
         _loggedUnsupportedFormat = 0;
+        _texImageFailures = 0;
         _vsyncEnabled = NO;
         pthread_mutex_init(&_renderMutex, NULL);
         pthread_cond_init(&_renderCond, NULL);
@@ -435,7 +440,10 @@
                                           imageWidth, imageHeight,
                                           glFormat, glType, surface, 0);
     if (err != kCGLNoError) {
-        NSLog(@"[LanScreen] CGLTexImageIOSurface2D failed: %d", (int)err);
+        if (_texImageFailures++ % 300 == 0) {
+            NSLog(@"[LanScreen] CGLTexImageIOSurface2D failed: %d (%u so far)",
+                  (int)err, _texImageFailures);
+        }
         return;
     }
 

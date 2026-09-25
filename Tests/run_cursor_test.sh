@@ -52,7 +52,7 @@ sleep 0.5
     -snapshot "$SNAPSHOT" -snapshotAfter "${SNAPSHOT_AFTER:-240}" > "$OUT/client.log" 2>&1 &
 CLIENT=$!
 sleep 1.5
-"$OUT/lsloopsend" 127.0.0.1 "$PORT" 420 60 bars greedy > /dev/null 2>&1
+"$OUT/lsloopsend" 127.0.0.1 "$PORT" 420 60 bars shipping > /dev/null 2>&1
 wait $CLIENT 2>/dev/null || true
 kill $CURSOR 2>/dev/null || true
 

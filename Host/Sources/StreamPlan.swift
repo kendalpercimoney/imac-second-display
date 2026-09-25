@@ -21,10 +21,12 @@ import LSProtocol
 ///
 /// This exists because two of the controls in the window turned out to do
 /// nothing: the Profile picker, which the low-latency rate controller silently
-/// overrides with Constrained Baseline, and Include mouse cursor, which is
+/// overrode with Constrained Baseline, and Include mouse cursor, which is
 /// ignored whenever the pointer is being sent separately. Both were being
 /// overridden deep inside the pipeline where nothing could see it, and the UI
-/// went on presenting them as live controls.
+/// went on presenting them as live controls. (The low-latency rate controller
+/// has since gone, measured as buying no latency at all, so the Profile picker
+/// means what it says again. The machinery that caught it stays.)
 ///
 /// So the overriding happens here instead, it is recorded in `overrides` as it
 /// happens, and the UI greys out a control it knows is not being honoured. A
@@ -33,7 +35,6 @@ import LSProtocol
 struct StreamPlan: Equatable {
 
     enum Profile: String, Equatable {
-        case constrainedBaseline = "Constrained Baseline"
         case baseline = "Baseline"
         case main = "Main"
     }
@@ -55,7 +56,8 @@ struct StreamPlan: Equatable {
     var bitrateBitsPerSecond: Int
     var profile: Profile
     var keyframeSeconds: Double
-    var lowLatencyRateControl: Bool
+    /// Streaming at the higher bitrate meant for moving pictures.
+    var videoMode: Bool
 
     // send
     var mtuPayload: Int
@@ -97,9 +99,23 @@ struct StreamPlan: Equatable {
         height = settings.height
         frameRate = settings.frameRate
         capturesYUV420 = settings.captureYUV420
-        bitrateBitsPerSecond = settings.bitrateBitsPerSecond
         keyframeSeconds = settings.keyframeSeconds
-        lowLatencyRateControl = settings.lowLatencyEncoder
+
+        // Video mode is a bitrate and nothing else, which is not where it
+        // started. It was going to spend latency on picture as well: let the
+        // encoder hold frames to look ahead, loosen the burst cap so a cut is
+        // not rationed over the following second. Neither survived measurement.
+        // MaxFrameDelayCount does nothing at all on this encoder (14.98 ms at
+        // 4, against 14.93 at 0), and loosening the cap from 4x to 16x bought
+        // 0.05 dB on the worst frame while spending 4% more bitrate for it.
+        //
+        // So the switch costs no latency, because there was no latency here
+        // worth buying anything with. What it does buy is real: 25 to 60 Mb/s
+        // is +3.3 dB at 1080p on hard content.
+        videoMode = settings.videoMode
+        bitrateBitsPerSecond = settings.videoMode
+            ? settings.videoBitrateBitsPerSecond
+            : settings.bitrateBitsPerSecond
         videoPort = settings.videoPort
         controlPort = settings.controlPort
         clientAddress = settings.clientAddress
@@ -140,18 +156,16 @@ struct StreamPlan: Equatable {
             capturesCursor = settings.showsCursor
         }
 
-        // VideoToolbox's low-latency rate controller only offers Constrained
-        // Baseline. Asking for Main alongside it does not fail, it is just not
-        // what you get.
-        if settings.lowLatencyEncoder {
-            profile = .constrainedBaseline
-            let note = Override(
-                control: "Profile",
-                reason: "low latency forces Constrained Baseline")
-            inert.append(note)
-            if settings.profile == .main { overrides.append(note) }
+        profile = settings.profile == .baseline ? .baseline : .main
+
+        // Exactly one of the two bitrates is in use at a time, so the other
+        // one is a control that cannot do anything and says so.
+        if settings.videoMode {
+            inert.append(Override(control: "Bitrate",
+                                  reason: "Video mode sets the bitrate"))
         } else {
-            profile = settings.profile == .baseline ? .baseline : .main
+            inert.append(Override(control: "Video bitrate",
+                                  reason: "Video mode is off"))
         }
 
         // A payload the link cannot carry is split into IP fragments, and one

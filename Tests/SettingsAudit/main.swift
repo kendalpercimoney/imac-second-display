@@ -20,6 +20,11 @@
 // Include mouse cursor was ignored whenever the pointer was being sent
 // separately. Both looked like live controls and neither was.
 //
+// The low-latency rate controller is gone now, so the Profile picker works
+// again -- but Video mode introduced the same shape of problem straight away,
+// because it takes the bitrate over from the everyday slider. That is caught
+// here rather than discovered by dragging a slider that does nothing.
+//
 // So: flip each setting in turn and require that it either changes the plan the
 // pipeline is built from, or is named in that plan's overrides. A control is
 // allowed to be ignored. It is not allowed to be ignored quietly.
@@ -50,7 +55,8 @@ let controls: [Control] = [
     Control(name: "Keyframe")              { $0.keyframeSeconds = $0.keyframeSeconds == 5 ? 2 : 5 },
     Control(name: "Include mouse cursor")  { $0.showsCursor.toggle() },
     Control(name: "Packet size")           { $0.mtuPayload = $0.mtuPayload == 1400 ? 8900 : 1400 },
-    Control(name: "Low-latency encoder")   { $0.lowLatencyEncoder.toggle() },
+    Control(name: "Video mode")            { $0.videoMode.toggle() },
+    Control(name: "Video bitrate")         { $0.videoBitrateMbps = $0.videoBitrateMbps == 60 ? 90 : 60 },
     Control(name: "4:2:0 capture")         { $0.captureYUV420.toggle() },
     Control(name: "Send the pointer separately") { $0.forwardCursor.toggle() },
     Control(name: "Client IP")             { $0.clientAddress = $0.clientAddress == "10.0.0.2" ? "10.0.0.9" : "10.0.0.2" },
@@ -87,7 +93,7 @@ func sweep(_ label: String, configure: (StreamSettings) -> Void) {
 
 // With the two overriding settings off, every control must reach the pipeline.
 sweep("every control, with nothing overriding anything") { settings in
-    settings.lowLatencyEncoder = false
+    settings.videoMode = false
     settings.captureYUV420 = false
     settings.forwardCursor = false
     settings.showsCursor = true
@@ -96,8 +102,8 @@ sweep("every control, with nothing overriding anything") { settings in
 }
 
 // And with them on, the two that get overridden must still be accounted for.
-sweep("every control, with low latency and the separate pointer on") { settings in
-    settings.lowLatencyEncoder = true
+sweep("every control, with video mode and the separate pointer on") { settings in
+    settings.videoMode = true
     settings.captureYUV420 = true
     settings.forwardCursor = true
     settings.showsCursor = true
@@ -111,31 +117,38 @@ print()
 print("==> the overrides are reported when they apply, and only then")
 
 do {
+    // What the low-latency rate controller used to break. Nothing overrides
+    // the picker now, so asking for Main must get Main.
     let s = StreamSettings()
-    s.lowLatencyEncoder = true
     s.profile = .main
     let p = plan(s)
-    check("Main + low latency is reported as overridden", p.overrideFor("Profile") != nil)
-    check("...and the plan really is Constrained Baseline", p.profile == .constrainedBaseline,
-          "\(p.profile.rawValue)")
-}
-do {
-    let s = StreamSettings()
-    s.lowLatencyEncoder = false
-    s.profile = .main
-    let p = plan(s)
-    check("Main without low latency is not reported", p.overrideFor("Profile") == nil)
+    check("the Profile picker is no longer overridden", p.overrideFor("Profile") == nil)
+    check("...and is no longer inert either", p.inertFor("Profile") == nil)
     check("...and the plan really is Main", p.profile == .main, "\(p.profile.rawValue)")
 }
 do {
     let s = StreamSettings()
-    s.lowLatencyEncoder = true
-    s.profile = .baseline
+    s.videoMode = true
+    s.bitrateMbps = 25
+    s.videoBitrateMbps = 90
     let p = plan(s)
-    check("Baseline + low latency loses nothing, so it is not warned about",
-          p.overrideFor("Profile") == nil)
-    check("...but the picker is still inert, because it cannot do anything",
-          p.inertFor("Profile") != nil)
+    check("Video mode really raises the bitrate",
+          p.bitrateBitsPerSecond == 90_000_000, "\(p.bitrateBitsPerSecond)")
+    check("...and says the everyday bitrate slider is doing nothing",
+          p.inertFor("Bitrate") != nil)
+    check("...and says so in the plan", p.videoMode)
+}
+do {
+    let s = StreamSettings()
+    s.videoMode = false
+    s.bitrateMbps = 25
+    s.videoBitrateMbps = 90
+    let p = plan(s)
+    check("with Video mode off the everyday bitrate is what is used",
+          p.bitrateBitsPerSecond == 25_000_000, "\(p.bitrateBitsPerSecond)")
+    check("...and it is the video bitrate that says it is doing nothing",
+          p.inertFor("Video bitrate") != nil)
+    check("...and the plan does not claim to be in video mode", !p.videoMode)
 }
 do {
     let s = StreamSettings()

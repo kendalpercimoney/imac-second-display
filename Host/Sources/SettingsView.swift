@@ -352,10 +352,6 @@ struct SettingsView: View {
                 .onChange(of: settings.clientBrightness) { _ in
                     controller.sendClientSettingsNow()
                 }
-                Text("Set on the iMac's own panel. A display that does not expose "
-                     + "brightness ignores it, and the client says so in its overlay.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(6)
         }
@@ -364,17 +360,6 @@ struct SettingsView: View {
     private var latencySection: some View {
         GroupBox("Latency") {
             VStack(alignment: .leading, spacing: 10) {
-                Toggle("Low-latency encoder and 4:2:0 capture", isOn: Binding(
-                    get: { settings.lowLatencyEncoder && settings.captureYUV420 },
-                    set: { settings.lowLatencyEncoder = $0; settings.captureYUV420 = $0 }))
-                    .disabled(controller.isRunning)
-                Text("Encoder hold time about 16 ms to about 9 ms. Costs half a decibel "
-                     + "of PSNR, and forces Constrained Baseline.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Divider()
-
                 Toggle("Send the pointer separately", isOn: $settings.forwardCursor)
                     .disabled(controller.isRunning)
                 Text("Drawn by the client, so it lags a refresh instead of the whole "

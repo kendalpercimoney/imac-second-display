@@ -57,6 +57,11 @@
     // Both are cached here by the main thread instead.
     volatile BOOL _hasWindow;
     GLsizei _cachedWidth, _cachedHeight;
+    /// Every completed draw. Watched from the once-a-second tick: frames
+    /// arriving and decoding while this stands still is a render thread that
+    /// has stopped, which is what a frozen picture looks like from the inside
+    /// and used to leave no trace at all.
+    uint32_t _framesDrawn;
     GLuint _cursorTexture;
     NSData *_pendingCursorImage;
     int _cursorImageWidth, _cursorImageHeight;
@@ -394,6 +399,7 @@
     _renderMicrosAverage = (_renderMicrosAverage == 0.0)
         ? micros : (_renderMicrosAverage * 0.85 + micros * 0.15);
     _renderMicroseconds = (uint32_t)_renderMicrosAverage;
+    _framesDrawn++;
 }
 
 - (void)drawBuffer:(CVPixelBufferRef)buffer

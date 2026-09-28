@@ -32,6 +32,9 @@
 - (void)stop;
 
 @property (nonatomic, readonly) uint64_t bytesReceived;
+/// How many times the receive socket had to be replaced because it stopped
+/// working. Normally zero for the life of a session.
+@property (nonatomic, readonly) uint32_t socketRestarts;
 /// Wall-clock time of the last datagram, for "has the host gone away" checks.
 @property (nonatomic, readonly) NSTimeInterval lastPacketTime;
 

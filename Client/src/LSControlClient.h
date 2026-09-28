@@ -81,5 +81,8 @@
 /// be doing -- drawing, for instance, which under vsync waits for the next
 /// vertical blank and so can only ever service half of them.
 @property (nonatomic, readonly) uint32_t cursorMessagesReceived;
+/// How many times the control socket had to be replaced because it stopped
+/// working. Normally zero for the life of a session.
+@property (nonatomic, readonly) uint32_t socketRestarts;
 
 @end

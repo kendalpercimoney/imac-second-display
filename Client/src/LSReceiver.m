@@ -27,6 +27,10 @@
     int _fd;
     NSThread *_thread;
     volatile BOOL _running;
+    /// How many times the socket had to be replaced. Reported, because a
+    /// stream that keeps needing this is a different problem from one that
+    /// never does, and neither used to leave any trace.
+    uint32_t _socketRestarts;
 }
 
 - (id)initWithPort:(uint16_t)port depacketizer:(LSDepacketizer *)depacketizer {
@@ -42,6 +46,22 @@
 - (void)dealloc { [self stop]; }
 
 - (BOOL)start:(NSError **)error {
+    if (![self openSocket:error]) return NO;
+
+    _running = YES;
+    _thread = [[NSThread alloc] initWithTarget:self selector:@selector(receiveLoop) object:nil];
+    [_thread setName:@"com.lanscreen.receive"];
+    [_thread setThreadPriority:1.0];
+    [_thread start];
+    return YES;
+}
+
+/// Creates and binds the socket. Split out from -start: so the receive loop can
+/// do it again: a socket that has stopped working is worth replacing, and the
+/// loop used to simply end instead, which left the iMac showing the last frame
+/// it received for the rest of the session with one line in the log to say why.
+- (BOOL)openSocket:(NSError **)error {
+    if (_fd >= 0) { close(_fd); _fd = -1; }
     _fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (_fd < 0) {
         if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
@@ -109,11 +129,6 @@
         return NO;
     }
 
-    _running = YES;
-    _thread = [[NSThread alloc] initWithTarget:self selector:@selector(receiveLoop) object:nil];
-    [_thread setName:@"com.lanscreen.receive"];
-    [_thread setThreadPriority:1.0];
-    [_thread start];
     return YES;
 }
 
@@ -151,18 +166,28 @@
                 // UDP socket can surface transient errors that say nothing
                 // about its health, so only a socket that is genuinely gone is
                 // fatal; everything else is logged and retried.
-                if (code == EBADF || code == ENOTSOCK) {
-                    NSLog(@"[LanScreen] video socket closed (%s)", strerror(code));
-                    break;
-                }
                 consecutiveErrors++;
                 if (consecutiveErrors == 1 || consecutiveErrors % 50 == 0) {
                     NSLog(@"[LanScreen] video receive error, continuing (%s, %d in a row)",
                           strerror(code), consecutiveErrors);
                 }
-                if (consecutiveErrors > 500) {
-                    NSLog(@"[LanScreen] video socket is not recovering, giving up");
-                    break;
+                // A socket that is gone, or one that has failed several hundred
+                // times running, is replaced rather than abandoned. Giving up
+                // here is indistinguishable from a freeze: the picture stops
+                // and the app goes on running as if nothing happened.
+                if (code == EBADF || code == ENOTSOCK || consecutiveErrors > 500) {
+                    _socketRestarts++;
+                    NSLog(@"[LanScreen] video socket is not working (%s); "
+                          @"reopening it (restart %u)", strerror(code), _socketRestarts);
+                    NSError *reopenError = nil;
+                    if (![self openSocket:&reopenError]) {
+                        NSLog(@"[LanScreen] could not reopen the video socket: %@; "
+                              @"retrying in a second", [reopenError localizedDescription]);
+                        usleep(1000000);
+                    } else {
+                        consecutiveErrors = 0;
+                    }
+                    continue;
                 }
                 usleep(2000);
                 continue;

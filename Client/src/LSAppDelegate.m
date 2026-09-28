@@ -70,6 +70,10 @@
     NSTimer  *_snapshotTimer;
     NSTimer  *_tickTimer;
     uint64_t  _bytesAtLastTick;
+    uint32_t  _drawnAtLastStallCheck;
+    uint32_t  _decodedAtLastStallCheck;
+    uint32_t  _stalledSeconds;
+    uint32_t  _socketRestartsSeen;
     double    _incomingMbps;
     BOOL      _sawFirstFrame;
     NSString *_fatalMessage;
@@ -367,7 +371,42 @@
     // queue simply plays the silence the ring drains to.
     [_depacketizer reset];
     [_glView clear];
+    [self watchForAStall];
     [self updateOverlay];
+}
+
+/// Says something when the picture has stopped for a reason the app can see.
+///
+/// The iMac froze after about twelve hours and left nothing behind: no crash,
+/// no log line, no counter that had obviously run away. The pieces that could
+/// stop independently -- the render thread, the two sockets -- now each leave a
+/// line when they do, so the next time there is something to read rather than
+/// only a still picture.
+- (void)watchForAStall {
+    uint32_t drawn   = [_glView framesDrawn];
+    uint32_t decoded = [_decoder framesDecoded];
+
+    // Frames going in and nothing coming out is a render thread that has gone
+    // away. Two seconds of it, because one still second is just a still screen.
+    if (_sawFirstFrame && decoded != _decodedAtLastStallCheck
+                       && drawn == _drawnAtLastStallCheck) {
+        _stalledSeconds++;
+        if (_stalledSeconds == 2 || (_stalledSeconds % 30) == 0) {
+            NSLog(@"[LanScreen] %u frames decoded and none drawn for %u seconds -- "
+                  @"the render thread has stopped", decoded - _decodedAtLastStallCheck,
+                  _stalledSeconds);
+        }
+    } else {
+        _stalledSeconds = 0;
+    }
+    _drawnAtLastStallCheck = drawn;
+    _decodedAtLastStallCheck = decoded;
+
+    uint32_t restarts = [_receiver socketRestarts] + (_control ? [_control socketRestarts] : 0);
+    if (restarts != _socketRestartsSeen) {
+        NSLog(@"[LanScreen] sockets replaced %u times so far this session", restarts);
+        _socketRestartsSeen = restarts;
+    }
 }
 
 - (void)sendHello {

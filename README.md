@@ -389,6 +389,39 @@ is nothing. Wrapping the body in one, to stop a 718-point panel running off the
 bottom of a laptop screen, made the panel stop appearing at all. The way to make
 it fit is for it to be shorter.
 
+### Looking for a twelve-hour freeze
+
+The client stopped after about twelve hours, with no crash and nothing in the
+log. Twelve hours is close enough to the RTP timestamp's 13h15m wrap — 32 bits
+at 90 kHz — to be worth ruling in or out rather than reasoning about, so both
+halves were measured.
+
+`./Tests/run_client_soak_test.sh` pushes twelve hours of frames, 2.59 million of
+them and some fifty million packets, through the depacketizer in about ten
+seconds while watching its own resident memory, and walks the timestamp across
+the wrap on the way. Resident size moves by 16 KB over the whole run and is flat
+after the first few hundred thousand frames: one allocator bump, not a leak. The
+threshold was confirmed by breaking it — leaking four bytes per frame turns into
+65 bytes per frame of real growth and the run fails.
+
+The second half replays real encoded frames through `LSDecoder` with timestamps
+walking up to the wrap, across it, and out the other side. 279 frames out
+before, 301 after, nothing stuck in the queue. **So the wrap is not it**, and
+neither is anything that accumulates per frame or per packet.
+
+What that search did turn up is a different way to stop forever. Both receive
+loops gave up permanently after 500 consecutive errors, or on `EBADF` — one log
+line, the thread exits, and the app goes on running with a still picture. For
+the control socket that is worse than it sounds: no pings means the client
+decides the host has gone and blanks, and saying hello is what that same socket
+is for, so it could never hear it come back. Both now replace the socket instead
+of abandoning it.
+
+And because none of this reproduced the actual freeze, the client now says when
+it is stuck: frames decoding while none are drawn means the render thread has
+stopped, and that gets a line a second rather than a still screen and no
+explanation. Sockets being replaced gets one too.
+
 ### Measured and rejected
 
 - **`ExpectedFrameRate` of 120 while feeding 60.** Takes the encoder's hold
@@ -566,6 +599,39 @@ no height of its own to give it — it fills what it is handed, which in a popov
 is nothing. Wrapping the body in one, to stop a 718-point panel running off the
 bottom of a laptop screen, made the panel stop appearing at all. The way to make
 it fit is for it to be shorter.
+
+### Looking for a twelve-hour freeze
+
+The client stopped after about twelve hours, with no crash and nothing in the
+log. Twelve hours is close enough to the RTP timestamp's 13h15m wrap — 32 bits
+at 90 kHz — to be worth ruling in or out rather than reasoning about, so both
+halves were measured.
+
+`./Tests/run_client_soak_test.sh` pushes twelve hours of frames, 2.59 million of
+them and some fifty million packets, through the depacketizer in about ten
+seconds while watching its own resident memory, and walks the timestamp across
+the wrap on the way. Resident size moves by 16 KB over the whole run and is flat
+after the first few hundred thousand frames: one allocator bump, not a leak. The
+threshold was confirmed by breaking it — leaking four bytes per frame turns into
+65 bytes per frame of real growth and the run fails.
+
+The second half replays real encoded frames through `LSDecoder` with timestamps
+walking up to the wrap, across it, and out the other side. 279 frames out
+before, 301 after, nothing stuck in the queue. **So the wrap is not it**, and
+neither is anything that accumulates per frame or per packet.
+
+What that search did turn up is a different way to stop forever. Both receive
+loops gave up permanently after 500 consecutive errors, or on `EBADF` — one log
+line, the thread exits, and the app goes on running with a still picture. For
+the control socket that is worse than it sounds: no pings means the client
+decides the host has gone and blanks, and saying hello is what that same socket
+is for, so it could never hear it come back. Both now replace the socket instead
+of abandoning it.
+
+And because none of this reproduced the actual freeze, the client now says when
+it is stuck: frames decoding while none are drawn means the render thread has
+stopped, and that gets a line a second rather than a still screen and no
+explanation. Sockets being replaced gets one too.
 
 ### Measured and rejected: App Nap
 

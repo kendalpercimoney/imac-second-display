@@ -34,6 +34,8 @@
     NSLock *_sendLock;
     uint8_t _localMAC[6];
     BOOL _haveLocalMAC;
+    /// How many times the control socket had to be replaced.
+    uint32_t _socketRestarts;
 }
 
 - (id)initWithHost:(NSString *)host port:(uint16_t)port {
@@ -50,6 +52,23 @@
 - (void)dealloc { [self stop]; }
 
 - (BOOL)start:(NSError **)error {
+    if (![self openSocket:error]) return NO;
+
+    [self discoverLocalMAC];
+
+    _running = YES;
+    _thread = [[NSThread alloc] initWithTarget:self selector:@selector(receiveLoop) object:nil];
+    [_thread setName:@"com.lanscreen.control"];
+    [_thread start];
+    return YES;
+}
+
+/// Creates and connects the socket. Split out so the receive loop can do it
+/// again: without the control channel there are no pings, so the app decides
+/// the host has gone and blanks the screen -- and then never hears it come
+/// back, because saying hello is what this socket is for.
+- (BOOL)openSocket:(NSError **)error {
+    if (_fd >= 0) { close(_fd); _fd = -1; }
     _fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (_fd < 0) {
         if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
@@ -83,12 +102,6 @@
         return NO;
     }
 
-    [self discoverLocalMAC];
-
-    _running = YES;
-    _thread = [[NSThread alloc] initWithTarget:self selector:@selector(receiveLoop) object:nil];
-    [_thread setName:@"com.lanscreen.control"];
-    [_thread start];
     return YES;
 }
 
@@ -247,18 +260,24 @@
                 // UDP socket can surface transient errors that say nothing
                 // about its health, so only a socket that is genuinely gone is
                 // fatal; everything else is logged and retried.
-                if (code == EBADF || code == ENOTSOCK) {
-                    NSLog(@"[LanScreen] control socket closed (%s)", strerror(code));
-                    break;
-                }
                 consecutiveErrors++;
                 if (consecutiveErrors == 1 || consecutiveErrors % 50 == 0) {
                     NSLog(@"[LanScreen] control receive error, continuing (%s, %d in a row)",
                           strerror(code), consecutiveErrors);
                 }
-                if (consecutiveErrors > 500) {
-                    NSLog(@"[LanScreen] control socket is not recovering, giving up");
-                    break;
+                if (code == EBADF || code == ENOTSOCK || consecutiveErrors > 500) {
+                    _socketRestarts++;
+                    NSLog(@"[LanScreen] control socket is not working (%s); "
+                          @"reopening it (restart %u)", strerror(code), _socketRestarts);
+                    NSError *reopenError = nil;
+                    if (![self openSocket:&reopenError]) {
+                        NSLog(@"[LanScreen] could not reopen the control socket: %@; "
+                              @"retrying in a second", [reopenError localizedDescription]);
+                        usleep(1000000);
+                    } else {
+                        consecutiveErrors = 0;
+                    }
+                    continue;
                 }
                 usleep(2000);
                 continue;

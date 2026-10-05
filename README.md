@@ -72,6 +72,30 @@ back (it was undershooting ~1%), restores Baseline in place of Constrained
 Baseline, and returns 0.2 dB of mean PSNR. It was better at exactly one thing:
 the single worst frame, 33.6 dB against 32.1.
 
+### What a zoom costs
+
+Zooming a photograph is the worst thing this pipeline is asked to carry: every
+pixel moves and none of it moves in a straight line, so inter prediction has
+almost nothing to work with. "It goes blocky when I zoom" has no answer that is
+not a number, so here is the number, 1080p60, mean and worst-frame PSNR over 400
+frames:
+
+| bitrate | mean | worst frame |
+|---|---|---|
+| 25 Mb/s | 40.24 dB | **32.05 dB** |
+| 49 Mb/s | 42.89 dB | **34.82 dB** |
+| 80 Mb/s | 44.35 dB | 37.32 dB |
+| 120 Mb/s | 45.57 dB | 38.92 dB |
+
+Below about 35 dB is visibly soft and below 30 is blocky, and it is the worst
+frames that get noticed — so a zoom at 49 Mb/s sits right on that line and a
+zoom at 120 does not. This is what Video mode is for.
+
+**The burst cap has nothing to do with it**, which is worth writing down because
+it keeps being the next suggestion. During a sustained zoom at 49 Mb/s, from 2x
+to 16x to removing it entirely: 42.87, 42.89, 42.90, 42.91, 42.87 dB. That is
+the same number five times.
+
 ### Video mode
 
 One switch in the panel, meant to be reached for mid-stream: it swaps the

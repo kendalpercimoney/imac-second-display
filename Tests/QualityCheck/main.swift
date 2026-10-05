@@ -256,6 +256,26 @@ trial("video mode (60 Mb/s, 8x burst, look-ahead)", bitrate: 60_000_000,
 // picture needs, so nothing the rate controller does can show up. Repeat the
 // comparison where the encoder actually has to choose what to spend bits on,
 // which is the only place look-ahead and a loose burst cap could earn anything.
+// How much bitrate a zoom actually needs. This is the recurring question --
+// zooming a photograph is the worst thing this pipeline is asked to carry, and
+// "it goes blocky when I zoom" has no answer that is not a number.
+print("\nWhat a zoom costs, by bitrate\n")
+for rate in [25, 49, 80, 120] {
+    trial("\(rate) Mb/s", bitrate: rate * 1_000_000, keyframeInterval: 5.0,
+          prioritizeSpeed: false, dataRateLimitMultiplier: 4.0)
+}
+
+// And whether the burst cap has anything to do with it, which is the other
+// thing that keeps getting suggested. Measured here during a sustained zoom
+// rather than only around a keyframe.
+print("\nThe burst cap during a sustained zoom, at 49 Mb/s\n")
+for m in [2.0, 4.0, 8.0, 16.0] {
+    trial("burst cap \(Int(m))x", bitrate: 49_000_000, keyframeInterval: 5.0,
+          prioritizeSpeed: false, dataRateLimitMultiplier: m)
+}
+trial("no burst cap at all", bitrate: 49_000_000, keyframeInterval: 5.0,
+      prioritizeSpeed: false, dataRateLimitMultiplier: nil)
+
 print("\nWhether the burst cap costs anything on a keyframe\n")
 // The runs above score a continuous zoom with a single keyframe they skip, so
 // the cap is never exercised. Here one lands every second and the worst frame

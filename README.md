@@ -381,6 +381,15 @@ slept and wrong for one that stops immediately every time. Four short-lived
 restarts in a row and it gives up and says to check Screen Recording, which is
 what that failure actually looks like.
 
+### It says where it went
+
+Launching an accessory app looks exactly like launching nothing: no Dock icon,
+no window, and on a laptop with a notch the status item may be behind it or
+pushed out of the menu bar altogether. So the host opens with a box carrying the
+icon itself, drawn six times menu-bar size, because "look for the little screen"
+is not much help when you cannot find it. It has a "Don't show this again"
+checkbox, and `--with-window` skips it.
+
 ### The panel is not in a ScrollView
 
 A `MenuBarExtra` popover takes its size from its content, and a `ScrollView` has
@@ -591,6 +600,15 @@ Bounded, because retrying is right for a capture that stopped because the Mac
 slept and wrong for one that stops immediately every time. Four short-lived
 restarts in a row and it gives up and says to check Screen Recording, which is
 what that failure actually looks like.
+
+### It says where it went
+
+Launching an accessory app looks exactly like launching nothing: no Dock icon,
+no window, and on a laptop with a notch the status item may be behind it or
+pushed out of the menu bar altogether. So the host opens with a box carrying the
+icon itself, drawn six times menu-bar size, because "look for the little screen"
+is not much help when you cannot find it. It has a "Don't show this again"
+checkbox, and `--with-window` skips it.
 
 ### The panel is not in a ScrollView
 

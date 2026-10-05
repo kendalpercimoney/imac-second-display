@@ -57,6 +57,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if UISnapshot.runIfRequested() { NSApp.terminate(nil); return }
         NSApp.setActivationPolicy(UnattendedRun.wantsWindow ? .regular : .accessory)
+
+        // After the scene is up, so the icon the box is pointing at is already
+        // there when the box is dismissed.
+        DispatchQueue.main.async { Self.announceTheMenuBar() }
+    }
+
+    /// Says where the app went.
+    ///
+    /// An accessory app has no Dock icon and opens no window, so launching it
+    /// looks exactly like launching nothing. On a laptop with a notch the icon
+    /// may also be the far side of it, or pushed out of the menu bar entirely
+    /// by whatever else is up there, and then there is genuinely nothing to see
+    /// anywhere on screen.
+    ///
+    /// So the box carries the icon itself, at a size you can actually make out,
+    /// rather than describing it.
+    private static func announceTheMenuBar() {
+        guard !UnattendedRun.wantsWindow else { return }
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "ls.hideLaunchNotice") else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "LanScreen is running, in the menu bar"
+        alert.informativeText =
+            "There is no Dock icon and no window. Click this icon at the top of "
+            + "the screen to start streaming, reach Settings, or quit.\n\n"
+            + "If you cannot find it, the menu bar may be full — macOS hides the "
+            + "items that do not fit, and on a Mac with a notch they go behind it."
+        alert.icon = Aero.menuBarIcon(running: false, attention: false, scale: 6)
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't show this again"
+        alert.addButton(withTitle: "OK")
+
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+        if alert.suppressionButton?.state == .on {
+            defaults.set(true, forKey: "ls.hideLaunchNotice")
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

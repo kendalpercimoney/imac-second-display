@@ -524,9 +524,18 @@ extension Aero {
     /// Drawn rather than shipped as an asset, so it can carry the running state
     /// in colour. Menu bar icons are normally templates; this one deliberately
     /// is not, because the point of it is the green light.
-    static func menuBarIcon(running: Bool, attention: Bool) -> NSImage {
-        let size = NSSize(width: 19, height: 16)
+    /// - Parameter scale: drawn larger than the menu bar wants it, for the
+    ///   launch box — which exists to say what to look for up there, and cannot
+    ///   do that with a 19-point picture of it.
+    static func menuBarIcon(running: Bool, attention: Bool,
+                            scale: CGFloat = 1) -> NSImage {
+        let size = NSSize(width: 19 * scale, height: 16 * scale)
         let image = NSImage(size: size, flipped: false) { _ in
+            if scale != 1 {
+                let transform = NSAffineTransform()
+                transform.scale(by: scale)
+                transform.concat()
+            }
             let body = NSRect(x: 1.5, y: 3.5, width: 16, height: 11)
             let screen = NSBezierPath(roundedRect: body, xRadius: 2, yRadius: 2)
 

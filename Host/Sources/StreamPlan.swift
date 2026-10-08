@@ -34,6 +34,16 @@ import LSProtocol
 /// plan or is named in `overrides` — a control may be ignored, but not silently.
 struct StreamPlan: Equatable {
 
+    /// The highest bitrate that still fits H.264 Level 4.2, which 1080p at 60
+    /// fps already needs. Above it VideoToolbox's AutoLevel moves the stream to
+    /// Level 5.0 -- measured on this encoder as 4.2 at 50 Mb/s and 5.0 at 55,
+    /// matching the spec's 50 Mb/s ceiling for Baseline and Main at 4.2.
+    ///
+    /// It matters because a level is a promise about how hard the stream is to
+    /// decode, and a hardware decoder that does not support a level does not
+    /// refuse the stream. It is decoded in software instead, silently.
+    static let level42MaxBitsPerSecond = 50_000_000
+
     enum Profile: String, Equatable {
         case baseline = "Baseline"
         case main = "Main"

@@ -242,7 +242,16 @@ typedef struct {
     uint32_t audio_underruns;   /* gaps the client had to conceal            */
     uint32_t audio_overruns;    /* frames dropped because the ring filled    */
     uint32_t audio_buffered_us; /* what is waiting, which is the delay it adds */
+    /* How the client is decoding. Appended after audio for the same reason, so
+     * an older client simply reports "not known". */
+    uint32_t decoder_flags;     /* LS_DECODER_* below                        */
 } ls_stats;
+
+/* decoder_flags. KNOWN is separate from HARDWARE because "the decoder would
+ * not say" and "the decoder said software" call for different responses, and
+ * an older client that sends nothing at all must not read as the second. */
+#define LS_DECODER_KNOWN     0x0001u
+#define LS_DECODER_HARDWARE  0x0002u
 
 typedef struct {
     uint8_t  type;              /* one of LS_MSG_*                            */

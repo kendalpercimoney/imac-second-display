@@ -52,6 +52,9 @@
 @property (nonatomic, readonly) uint32_t decodeMicrosecondsLast;
 @property (nonatomic, readonly) uint32_t decodeMicrosecondsPeak;
 @property (nonatomic, readonly) uint32_t queueDepth;
+/// LS_DECODER_* flags: whether the session said which decoder it is using,
+/// and if so whether that is the hardware one. Zero until a session exists.
+@property (nonatomic, readonly) uint32_t decoderFlags;
 /// YES once a session exists and at least one frame came out of it.
 @property (nonatomic, readonly) BOOL hasDecodedFrame;
 /// Human-readable reason the decoder is unhappy, or nil.

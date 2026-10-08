@@ -511,6 +511,7 @@
         stats.decode_us        = [_decoder decodeMicroseconds];
         stats.render_us        = [_glView renderMicroseconds];
         stats.queue_depth      = [_decoder queueDepth];
+        stats.decoder_flags    = [_decoder decoderFlags];
         if (_audioPlayer) {
             stats.audio_underruns   = [_audioPlayer underruns];
             stats.audio_overruns    = [_audioPlayer overruns];

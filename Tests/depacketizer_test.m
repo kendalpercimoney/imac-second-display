@@ -788,14 +788,57 @@ static void testStatsAudioFields(void) {
 
     // A client built before audio existed sends the shorter message. It must
     // still parse, with the audio counters simply absent, rather than the whole
-    // report being thrown away.
+    // report being thrown away. Cut to exactly the 32-byte body such a client
+    // sends -- by its real size, not by an offset from whatever the current
+    // message happens to be, which silently stopped meaning "pre-audio" the
+    // moment another field was appended.
+    size_t preAudio = (n - 48) + 32;
     uint8_t older[LS_CTRL_MAX_SIZE];
     memcpy(older, buffer, n);
-    older[6] = (uint8_t)(((n - 12) >> 8) & 0xFF);
-    older[7] = (uint8_t)((n - 12) & 0xFF);
-    CHECK(ls_ctrl_parse(older, n - 12, &message) == 0, "a pre-audio stats message was rejected");
+    older[6] = (uint8_t)(((preAudio) >> 8) & 0xFF);
+    older[7] = (uint8_t)((preAudio) & 0xFF);
+    memset(&message, 0xAB, sizeof(message));
+    CHECK(ls_ctrl_parse(older, preAudio, &message) == 0, "a pre-audio stats message was rejected");
     CHECK(message.stats.frames_decoded == 1234, "the older message lost its counters");
     CHECK(message.stats.audio_underruns == 0, "the older message invented audio counters");
+    CHECK(message.stats.decoder_flags == 0, "the older message invented decoder flags");
+}
+
+static void testStatsDecoderFlags(void) {
+    printf("stats say how the client is decoding, and an older client says nothing\n");
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+    ls_stats stats;
+    memset(&stats, 0, sizeof(stats));
+    stats.frames_decoded = 99;
+    stats.audio_buffered_us = 7;
+    stats.decoder_flags = LS_DECODER_KNOWN | LS_DECODER_HARDWARE;
+
+    size_t n = ls_ctrl_build_stats(buffer, sizeof(buffer), &stats);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "stats did not parse");
+    CHECK(message.stats.decoder_flags == (LS_DECODER_KNOWN | LS_DECODER_HARDWARE),
+          "the decoder flags did not round trip");
+    CHECK(message.stats.audio_buffered_us == 7, "appending the flags broke the audio field");
+
+    stats.decoder_flags = LS_DECODER_KNOWN;
+    n = ls_ctrl_build_stats(buffer, sizeof(buffer), &stats);
+    CHECK(ls_ctrl_parse(buffer, n, &message) == 0
+          && message.stats.decoder_flags == LS_DECODER_KNOWN,
+          "\"known, and software\" did not round trip -- that is the one that matters");
+
+    // The client the user is running right now predates this field. Its
+    // message is the 44-byte body, and it must read as "not known", never as
+    // "software", or every existing client would be reported as overheating.
+    // Bytes 6-7 are the total length, header included -- not the body.
+    size_t preDecoder = n - 4;
+    buffer[6] = (uint8_t)((preDecoder >> 8) & 0xFF);
+    buffer[7] = (uint8_t)(preDecoder & 0xFF);
+    memset(&message, 0xAB, sizeof(message));
+    CHECK(ls_ctrl_parse(buffer, preDecoder, &message) == 0,
+          "a stats message from before the decoder flags was rejected");
+    CHECK(message.stats.audio_buffered_us == 7, "it lost its audio counters");
+    CHECK((message.stats.decoder_flags & LS_DECODER_KNOWN) == 0,
+          "an older client was reported as having said how it decodes");
 }
 
 int main(void) {
@@ -813,6 +856,7 @@ int main(void) {
         testAudioDelayAndBrightness();
         testAudioConcealment();
         testStatsAudioFields();
+    testStatsDecoderFlags();
 
         if (gFailures == 0) {
             printf("\nAll depacketizer tests passed.\n");

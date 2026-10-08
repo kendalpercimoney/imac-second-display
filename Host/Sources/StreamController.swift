@@ -959,7 +959,7 @@ final class StreamController: ObservableObject {
 extension StreamController {
     /// Plausible mid-stream numbers, for `--render-ui` only. Nothing in the app
     /// calls this.
-    func applyPreviewState() {
+    func applyPreviewState(decoderFlags: UInt32 = UInt32(LS_DECODER_KNOWN | LS_DECODER_HARDWARE)) {
         isRunning = true
         statusText = "Streaming to 10.0.0.2:5004"
         outgoingMbps = 23.4
@@ -985,6 +985,11 @@ extension StreamController {
         state.stats.frames_decoded = 18422
         state.stats.frames_dropped = 2
         state.stats.packets_lost = 0
+        state.stats.decoder_flags = decoderFlags
         client = state
+        // Built the way a running stream builds it, so anything that reads the
+        // plan -- the bitrate the level note compares against -- sees the
+        // settings the snapshot set rather than whatever was there before.
+        plan = StreamPlan(settings: settings, linkMTU: 1500)
     }
 }

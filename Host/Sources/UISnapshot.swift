@@ -15,6 +15,7 @@
 
 import SwiftUI
 import AppKit
+import LSProtocol
 
 /// `LanScreenHost --render-ui <dir>` draws the menu bar panel and the settings
 /// window straight to PNG and exits, without opening either. It exists so the
@@ -28,6 +29,21 @@ enum UISnapshot {
               args.index(after: flag) < args.endIndex else { return false }
         let directory = URL(fileURLWithPath: args[args.index(after: flag)])
 
+        // StreamSettings saves every change to the real preferences, and this
+        // sets things -- Video mode, a packet size -- to put the panel in the
+        // states worth looking at. Run from the app bundle that domain is the
+        // user's own, so without this a snapshot quietly turned Video mode on
+        // for the next real launch. Put everything back exactly as found.
+        let domain = Bundle.main.bundleIdentifier ?? "com.lanscreen.host"
+        let saved = UserDefaults.standard.persistentDomain(forName: domain)
+        defer {
+            if let saved {
+                UserDefaults.standard.setPersistentDomain(saved, forName: domain)
+            } else {
+                UserDefaults.standard.removePersistentDomain(forName: domain)
+            }
+        }
+
         let settings = StreamSettings()
         let controller = StreamController(settings: settings)
 
@@ -40,6 +56,16 @@ enum UISnapshot {
         controller.applyPreviewState()
         write(MenuBarPanel(settings: settings, controller: controller),
               to: directory.appendingPathComponent("panel-running.png"),
+              width: 372)
+
+        // Video mode above the Level 4.2 ceiling with the client reporting
+        // software decode: the one state the level note exists for, and so
+        // the one that would otherwise never be looked at before it matters.
+        settings.videoMode = true
+        settings.videoBitrateMbps = 120
+        controller.applyPreviewState(decoderFlags: UInt32(LS_DECODER_KNOWN))
+        write(MenuBarPanel(settings: settings, controller: controller),
+              to: directory.appendingPathComponent("panel-software-decode.png"),
               width: 372)
 
         // The status item glyph is hand-drawn, so it gets checked too, blown

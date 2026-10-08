@@ -96,6 +96,36 @@ it keeps being the next suggestion. During a sustained zoom at 49 Mb/s, from 2x
 to 16x to removing it entirely: 42.87, 42.89, 42.90, 42.91, 42.87 dB. That is
 the same number five times.
 
+### Above 50 Mb/s is a different stream
+
+An H.264 level is a promise about how hard a stream is to decode, and VideoToolbox
+picks it for itself from the resolution, frame rate and bitrate. 1080p at 60 fps
+already needs Level 4.2, whose bitrate ceiling is 50 Mb/s. Measured on this
+encoder:
+
+| bitrate | level |
+|---|---|
+| 25, 40, 49, 50 Mb/s | 4.2 |
+| 55, 80, 120 Mb/s | **5.0** |
+
+That matters because a hardware decoder that does not support a level does not
+refuse the stream. VideoToolbox decodes it in software instead, with no error.
+Asking for hardware decode (which the client always has) is a request, not a
+guarantee.
+
+So the client now asks the session which decoder it actually got, logs it with
+the level when the session comes up —
+
+    decode session up, pixel format 2vuy, H.264 level 4.2, HARDWARE decode
+
+— and reports it to the host, which shows it in the Link group. If it says
+software while the stream is above 50 Mb/s, the panel says that is the likely
+reason and to try 50 or less. If it says software *below* 50, the level is not
+the explanation and the panel does not offer it as one.
+
+Whether a 2010 iMac's decoder takes Level 5.0 is exactly the thing that could
+not be checked from here, which is why this is a report and not a cap.
+
 ### Video mode
 
 One switch in the panel, meant to be reached for mid-stream: it swaps the

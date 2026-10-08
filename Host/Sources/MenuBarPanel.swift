@@ -237,8 +237,7 @@ struct MenuBarPanel: View {
                             alarm: controller.packetsNotSent > 0)
                     readout("Corrupt", "\(controller.client.stats.frames_corrupt)",
                             alarm: controller.client.stats.frames_corrupt > 0)
-                    readout("Encode", controller.encodeMilliseconds > 0
-                            ? String(format: "%.2f ms", controller.encodeMilliseconds) : "—")
+                    readout("Decoder", decoderLabel, alarm: decodingInSoftware)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -255,6 +254,33 @@ struct MenuBarPanel: View {
                     .padding(.top, 4)
             }
         }
+    }
+
+    // MARK: - How the client is decoding
+
+    private var decoderFlags: UInt32 { controller.client.stats.decoder_flags }
+    private var decoderKnown: Bool { decoderFlags & UInt32(LS_DECODER_KNOWN) != 0 }
+
+    private var decodingInSoftware: Bool {
+        controller.isRunning && decoderKnown
+            && decoderFlags & UInt32(LS_DECODER_HARDWARE) == 0
+    }
+
+    /// "—" covers both "no stream yet" and "a client too old to say". Neither
+    /// is evidence of anything, and must not look like software.
+    private var decoderLabel: String {
+        guard controller.isRunning, decoderKnown else { return "—" }
+        return decodingInSoftware ? "software" : "hardware"
+    }
+
+    /// Only said when both halves have actually been observed: the client
+    /// reports software decode, and the stream really is above the Level 4.2
+    /// ceiling. Software decode below it is a different problem and gets the
+    /// red readout without a guess attached.
+    private var softwareBecauseOfLevel: Bool {
+        decodingInSoftware
+            && controller.activeBitrateMbps * 1_000_000
+                > Double(StreamPlan.level42MaxBitsPerSecond)
     }
 
     /// Whether the configured packet size is being cut down to fit the link,
@@ -340,6 +366,15 @@ struct MenuBarPanel: View {
                 .opacity(settings.videoMode ? 1 : 0.5)
                 .onChange(of: settings.videoBitrateMbps) { _ in
                     controller.applyEncoderModeNow()
+                }
+
+                if softwareBecauseOfLevel {
+                    Text("Above 50 Mb/s the stream is H.264 Level 5, and the iMac "
+                         + "is decoding it in software, which is what heats it up. "
+                         + "Try 50 Mb/s or less.")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Aero.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
             }

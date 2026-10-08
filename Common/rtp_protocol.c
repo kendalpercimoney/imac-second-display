@@ -185,7 +185,7 @@ size_t ls_ctrl_build_stats(uint8_t *dst, size_t cap, const ls_stats *stats)
 {
     size_t total;
     if (!stats) return 0;
-    total = ctrl_begin(dst, cap, LS_MSG_STATS, 44);
+    total = ctrl_begin(dst, cap, LS_MSG_STATS, 48);
     if (!total) return 0;
     put_u32(dst + CTRL_HDR +  0, stats->frames_decoded);
     put_u32(dst + CTRL_HDR +  4, stats->frames_dropped);
@@ -198,6 +198,7 @@ size_t ls_ctrl_build_stats(uint8_t *dst, size_t cap, const ls_stats *stats)
     put_u32(dst + CTRL_HDR + 32, stats->audio_underruns);
     put_u32(dst + CTRL_HDR + 36, stats->audio_overruns);
     put_u32(dst + CTRL_HDR + 40, stats->audio_buffered_us);
+    put_u32(dst + CTRL_HDR + 44, stats->decoder_flags);
     return total;
 }
 
@@ -360,6 +361,9 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
                 out->stats.audio_underruns   = get_u32(src + CTRL_HDR + 32);
                 out->stats.audio_overruns    = get_u32(src + CTRL_HDR + 36);
                 out->stats.audio_buffered_us = get_u32(src + CTRL_HDR + 40);
+            }
+            if (body >= 48) {
+                out->stats.decoder_flags = get_u32(src + CTRL_HDR + 44);
             }
             return 0;
 

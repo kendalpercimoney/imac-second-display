@@ -804,6 +804,76 @@ static void testStatsAudioFields(void) {
     CHECK(message.stats.decoder_flags == 0, "the older message invented decoder flags");
 }
 
+static void testInputMessages(void) {
+    printf("input messages round trip, signed, and refuse what is not a key\n");
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+    size_t n;
+
+    // Motion is relative and goes both ways. A sign lost in the wire format is
+    // a pointer that can only ever move right and down.
+    n = ls_ctrl_build_input_move(buffer, sizeof(buffer), -37, 1200);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.type == LS_MSG_INPUT_MOVE, "move did not parse");
+    CHECK(message.input_dx == -37 && message.input_dy == 1200,
+          "move lost its sign or its size");
+
+    n = ls_ctrl_build_input_button(buffer, sizeof(buffer), LS_BUTTON_RIGHT, 1, 2);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_button == LS_BUTTON_RIGHT && message.input_down == 1
+          && message.input_click_count == 2, "button did not round trip");
+
+    n = ls_ctrl_build_input_scroll(buffer, sizeof(buffer), 15, -250, 1);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_dx == 15 && message.input_dy == -250
+          && message.input_precise == 1, "scroll did not round trip");
+
+    n = ls_ctrl_build_input_key(buffer, sizeof(buffer), 12, 1, 1, 0x00100008u);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_keycode == 12 && message.input_down == 1
+          && message.input_repeat == 1 && message.input_modifiers == 0x00100008u,
+          "key did not round trip");
+
+    n = ls_ctrl_build_input_flags(buffer, sizeof(buffer), 56, 0x00020002u);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_keycode == 56 && message.input_modifiers == 0x00020002u,
+          "flags did not round trip");
+
+    uint8_t held[LS_INPUT_KEY_BITMAP_BYTES];
+    memset(held, 0, sizeof(held));
+    held[0] |= 1u << 0;            // keycode 0, 'a'
+    held[127 / 8] |= 1u << (127 % 8);  // the highest keycode there is
+    n = ls_ctrl_build_input_state(buffer, sizeof(buffer), 1, 0x5, 0x100u, held);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_engaged == 1 && message.input_buttons == 0x5
+          && message.input_modifiers == 0x100u
+          && memcmp(message.input_held_keys, held, sizeof(held)) == 0,
+          "state did not round trip, including both ends of the key bitmap");
+
+    n = ls_ctrl_build_input_status(buffer, sizeof(buffer), 0, LS_INPUT_NEEDS_PERMISSION);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_accepting == 0
+          && message.input_reason == LS_INPUT_NEEDS_PERMISSION,
+          "status did not round trip");
+
+    // Refused rather than passed on. A keycode outside 0-127 is not a key and
+    // would index past the held-key bitmap on the host.
+    n = ls_ctrl_build_input_key(buffer, sizeof(buffer), 128, 1, 0, 0);
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "keycode 128 was accepted");
+    n = ls_ctrl_build_input_flags(buffer, sizeof(buffer), 300, 0);
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "flags keycode 300 was accepted");
+    n = ls_ctrl_build_input_button(buffer, sizeof(buffer), 40, 1, 1);
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "button 40 was accepted");
+
+    // A truncated state must not be read past its end: it carries the
+    // held-key bitmap, and half a bitmap would release keys that are held.
+    n = ls_ctrl_build_input_state(buffer, sizeof(buffer), 1, 0, 0, held);
+    size_t cut = n - 4;
+    buffer[6] = (uint8_t)((cut >> 8) & 0xFF);
+    buffer[7] = (uint8_t)(cut & 0xFF);
+    CHECK(ls_ctrl_parse(buffer, cut, &message) != 0, "a truncated input state was accepted");
+}
+
 static void testStatsDecoderFlags(void) {
     printf("stats say how the client is decoding, and an older client says nothing\n");
     uint8_t buffer[LS_CTRL_MAX_SIZE];
@@ -857,6 +927,7 @@ int main(void) {
         testAudioConcealment();
         testStatsAudioFields();
     testStatsDecoderFlags();
+    testInputMessages();
 
         if (gFailures == 0) {
             printf("\nAll depacketizer tests passed.\n");

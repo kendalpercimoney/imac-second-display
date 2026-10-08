@@ -77,6 +77,8 @@ struct StreamPlan: Equatable {
 
     // pointer
     var forwardsCursorSeparately: Bool
+    /// Whether the iMac's keyboard and mouse are acted on.
+    var acceptsInput: Bool
 
     // audio
     var sendsAudio: Bool
@@ -104,7 +106,8 @@ struct StreamPlan: Equatable {
     ///     sent to a client that says it can play it — otherwise it is 1.5 Mb/s
     ///     into a socket nothing is listening to.
     init(settings: StreamSettings, linkMTU: Int? = nil,
-         clientPlaysAudio: Bool? = nil, clientSetsBrightness: Bool? = nil) {
+         clientPlaysAudio: Bool? = nil, clientSetsBrightness: Bool? = nil,
+         clientSendsInput: Bool? = nil) {
         width = settings.width
         height = settings.height
         frameRate = settings.frameRate
@@ -130,6 +133,11 @@ struct StreamPlan: Equatable {
         controlPort = settings.controlPort
         clientAddress = settings.clientAddress
         forwardsCursorSeparately = settings.forwardCursor
+        acceptsInput = settings.acceptInput
+        if clientSendsInput == false {
+            inert.append(Override(control: "Use the iMac's keyboard and mouse",
+                                  reason: "this client cannot send them"))
+        }
         wakesClient = settings.wakeClientAutomatically
         holdsFullPerformance = settings.preventAppNap
         stopsOnSleep = settings.stopOnSleep

@@ -115,6 +115,11 @@ final class StreamSettings: ObservableObject {
     /// trip, at the cost of it running slightly ahead of a window being dragged.
     @Published var forwardCursor: Bool { didSet { save(forwardCursor, "forwardCursor") } }
 
+    /// Let the iMac's own keyboard and mouse drive this Mac while its window is
+    /// in front. The pointer moves across both displays, the same way a second
+    /// monitor's would. Needs the Accessibility permission to do anything.
+    @Published var acceptInput: Bool { didSet { save(acceptInput, "acceptInput") } }
+
     /// Send the Mac's system audio to the client, which plays it. Raw PCM, so
     /// it costs 1.5 Mb/s and adds no encode or decode delay of its own.
     @Published var audioEnabled: Bool { didSet { save(audioEnabled, "audioEnabled") } }
@@ -167,6 +172,7 @@ final class StreamSettings: ObservableObject {
         videoMode = d.object(forKey: "ls.videoMode") as? Bool ?? false
         videoBitrateMbps = dbl("videoBitrateMbps", 60)
         forwardCursor = d.object(forKey: "ls.forwardCursor") as? Bool ?? true
+        acceptInput = d.object(forKey: "ls.acceptInput") as? Bool ?? true
         audioEnabled = d.object(forKey: "ls.audioEnabled") as? Bool ?? false
         audioVolume = d.object(forKey: "ls.audioVolume") as? Double ?? 0.8
         audioPort = int("audioPort", Int(LS_DEFAULT_AUDIO_PORT))

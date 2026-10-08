@@ -54,6 +54,18 @@ for source in "$ROOT"/Client/src/*.m "$ROOT"/Common/rtp_protocol.c; do
     fi
 done
 
+# Every source has to be in build.sh too. This loop compiles whatever is in the
+# directory; the iMac's build compiles only what build.sh lists, so a new file
+# left out of the list passes everything here and then fails to link there.
+for source in "$ROOT"/Client/src/*.m; do
+    name="$(basename "$source")"
+    if ! grep -q "Client/src/$name\"" "$ROOT/Client/build.sh"; then
+        echo
+        echo "  $name is not in Client/build.sh, so the iMac's build would not link"
+        failed=1
+    fi
+done
+
 echo
 if [ "$failed" = "0" ]; then
     echo "RESULT: PASS — nothing newer than $TARGET"

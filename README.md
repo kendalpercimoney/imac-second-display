@@ -164,6 +164,60 @@ B-frames are the one real lever left, and they are refused deliberately: the
 client decodes synchronously and draws whatever comes out, so it has no way to
 put decode order back into display order.
 
+### The iMac's keyboard and mouse drive the Mac
+
+While the client's window is in front, the iMac's own keyboard and mouse
+control the Mac it is a display for. The pointer moves **across both displays**
+— off the edge of the virtual display and on to the Mac's own screen, the way a
+second monitor works — because motion is sent as deltas, not as a position on
+the iMac's screen. A position could only ever land somewhere on the virtual
+display; a delta can carry the pointer off it.
+
+- **Taking over** happens when the window becomes the front window, or when you
+  click the picture. That click is not sent on: landing on whatever is under
+  the Mac's pointer would be a surprise.
+- **Giving back** is Control-Option-Escape. Not Command-Option-Escape, which is
+  Force Quit and best left alone. Switching away from the window gives it back
+  too.
+- While it is taken, everything that reaches the app goes to the Mac, including
+  Command-Q and Escape, which used to quit the client. What never reaches an app
+  — Command-Tab, Command-Space, Mission Control — stays with the iMac.
+
+The iMac's pointer is parked in the middle of the window and frozen there
+(`CGAssociateMouseAndMouseCursorPosition`), so it never reaches the iMac's own
+screen edges. What you see is the Mac's pointer, drawn by the client as before.
+
+**The Mac needs the Accessibility permission**, without which posted events go
+nowhere — no error, no event. The panel says when it is missing and has an
+Allow button. Like Screen Recording, the grant is tied to the app's code
+signature, so a rebuild of the host means granting it again.
+
+**Only the client that said HELLO is listened to.** The host otherwise follows
+whoever sent it a well-formed datagram last, which is fine for knowing where to
+send pings and not fine for deciding who may type on this Mac. Matched by IP,
+because the client's source port changes when it has to replace its socket.
+
+**Nothing is left held down.** UDP loses the odd datagram, and a lost key-up is
+a key held on the Mac forever. So the client sends everything it holds four
+times a second while forwarding, and the host lets go of anything it thinks is
+held that the client does not list. The reverse is deliberately not repaired:
+that is a lost key-down, and typing it late would be worse. A client that goes
+quiet with something held has it released after a second and a half, and
+stopping the stream releases everything before anything else is torn down.
+
+Smaller things that each had to be right: a drag is a drag event, not a move
+with a button down, or nothing can be dragged; the iMac's click count is carried
+across, or nothing opens on double-click; key repeat is the iMac's own, forwarded
+as it happens; motion is scaled to the size the picture is drawn at; and
+fractions of a point are carried rather than rounded away, or a slow hand never
+moves the pointer at all.
+
+`./Tests/run_input_test.sh` checks both ends — the client's forwarder through to
+the bytes it sends, and the host's injector with every event recorded instead of
+posted, so it needs no permission and moves nothing. Mutation-checked: without
+the drag mapping, the edge clamping, the stuck-key reconciliation, the fraction
+carrying, the refusal to engage, or the exact release shortcut, it fails.
+
 ### Audio, uncompressed and on its own socket
 
 The Mac's system audio goes to the iMac as raw PCM: 48 kHz, stereo, 16-bit,

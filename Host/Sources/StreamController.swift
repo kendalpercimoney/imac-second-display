@@ -62,6 +62,9 @@ final class StreamController: ObservableObject {
     @Published private(set) var activeSourceDescription: String = ""
     @Published private(set) var wakeStatus: String = ""
     @Published private(set) var fullPerformanceHeld = false
+    /// Whether this app has the Accessibility permission, without which posted
+    /// keyboard and mouse events go nowhere.
+    @Published private(set) var inputTrusted = InputInjector.isTrusted
     @Published var displays: [DisplayInfo] = []
 
     var virtualDisplaySupported: Bool { LSVirtualDisplay.isSupported() }
@@ -78,6 +81,14 @@ final class StreamController: ObservableObject {
     private var virtualDisplay: LSVirtualDisplay?
     private var cursorTracker: CursorTracker?
     private var audioSender: AudioSender?
+    /// Turns the iMac's keyboard and mouse into events here. Its own lock makes
+    /// it safe to call from the control thread and the encode queue alike.
+    private var injector: InputInjector?
+    /// Whether input from the client is acted on right now: switched on, and
+    /// permitted. Refreshed with the settings push every two seconds, and read
+    /// on the control thread for every input message, hence the lock.
+    private let inputLock = NSLock()
+    private var inputAccepted = false
     /// Resent periodically, because a lost volume message would otherwise leave
     /// the iMac at whatever it was last told until something else changed it.
     private var volumeTimer: DispatchSourceTimer?
@@ -405,7 +416,8 @@ final class StreamController: ObservableObject {
         let plan = StreamPlan(settings: settings, linkMTU: linkMTU,
                               clientPlaysAudio: client.hasSaidHello ? client.playsAudio : nil,
                               clientSetsBrightness: client.hasSaidHello
-                                  ? client.setsBrightness : nil)
+                                  ? client.setsBrightness : nil,
+                              clientSendsInput: client.hasSaidHello ? client.sendsInput : nil)
         let effectivePayload = plan.mtuPayload
         var pathWarnings: [String] = []
         if let mtu = linkMTU, effectivePayload != requestedPayload {
@@ -458,6 +470,17 @@ final class StreamController: ObservableObject {
         }
         control.onStateChanged = { [weak self] state in
             self?.onMain { self?.client = state }
+        }
+
+        let injector = InputInjector()
+        injector.onPointerMoved = { [weak self] in self?.cursorTracker?.sampleNow() }
+        self.injector = injector
+        control.onInput = { [weak self] message in
+            guard let self else { return }
+            self.inputLock.lock()
+            let accepted = self.inputAccepted
+            self.inputLock.unlock()
+            if accepted { self.injector?.handle(message) }
         }
         try control.start(port: UInt16(settings.controlPort))
 
@@ -608,6 +631,10 @@ final class StreamController: ObservableObject {
     }
 
     private func teardown() async {
+        // First: a stream that stops with a key held would leave it held.
+        injector?.releaseAll()
+        injector = nil
+        setInputAccepted(false)
         endFullPerformance()
         cursorTracker?.stop(); cursorTracker = nil
         volumeTimer?.cancel(); volumeTimer = nil
@@ -713,9 +740,27 @@ final class StreamController: ObservableObject {
             n = ls_ctrl_build_audio_delay(&buffer, buffer.count, settings.audioDelayWireValue)
             if n > 0 { control.send(buffer, count: Int(n)) }
         }
-        let n = ls_ctrl_build_brightness(&buffer, buffer.count,
+        var n = ls_ctrl_build_brightness(&buffer, buffer.count,
                                          settings.clientBrightnessThousandths)
         if n > 0 { control.send(buffer, count: Int(n)) }
+
+        // Whether input will be acted on, told to the client every time so it
+        // never takes the iMac's mouse away from it for nothing -- which is
+        // what would happen if it grabbed the pointer while this side had no
+        // permission to post a single event.
+        let trusted = InputInjector.isTrusted
+        let accepting = settings.acceptInput && trusted
+        let reason = !settings.acceptInput ? LS_INPUT_OFF_IN_SETTINGS
+                   : !trusted ? LS_INPUT_NEEDS_PERMISSION : LS_INPUT_OK
+        inputLock.lock()
+        let wasAccepting = inputAccepted
+        inputAccepted = accepting
+        inputLock.unlock()
+        if wasAccepting && !accepting { injector?.releaseAll() }
+        n = ls_ctrl_build_input_status(&buffer, buffer.count,
+                                       accepting ? 1 : 0, UInt8(reason))
+        if n > 0 { control.send(buffer, count: Int(n)) }
+        if trusted != inputTrusted { onMain { self.inputTrusted = trusted } }
     }
 
     /// Whether audio is actually going out, so the audio-only messages are not
@@ -759,7 +804,8 @@ final class StreamController: ObservableObject {
                                  linkMTU: startedWithLinkMTU,
                                  clientPlaysAudio: client.hasSaidHello ? client.playsAudio : nil,
                                  clientSetsBrightness: client.hasSaidHello
-                                     ? client.setsBrightness : nil)
+                                     ? client.setsBrightness : nil,
+                                 clientSendsInput: client.hasSaidHello ? client.sendsInput : nil)
         onMain { self.plan = rebuilt }
         encodeQueue.async { [weak self] in
             guard let self, let outgoing = self.encoder else { return }
@@ -796,6 +842,25 @@ final class StreamController: ObservableObject {
         }
     }
 
+    /// Outside the async teardown, because NSLock is not to be taken across a
+    /// suspension point and Swift 6 will refuse it there.
+    private func setInputAccepted(_ value: Bool) {
+        inputLock.lock(); inputAccepted = value; inputLock.unlock()
+    }
+
+    /// Shows the system's Accessibility prompt, and re-checks shortly after so
+    /// the panel and the client catch up once it has been granted.
+    func requestInputPermission() {
+        InputInjector.requestTrust()
+        for delay in [2.0, 5.0, 10.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                self.inputTrusted = InputInjector.isTrusted
+                self.sendClientSettingsNow()
+            }
+        }
+    }
+
     /// The bitrate the running stream is actually using, for the meter to
     /// scale against. Falls back to what the settings would produce before a
     /// stream exists.
@@ -809,7 +874,10 @@ final class StreamController: ObservableObject {
         let timer = DispatchSource.makeTimerSource(queue: encodeQueue)
         timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
         timer.setEventHandler { [weak self] in
-            guard let self, let encoder = self.encoder else { return }
+            guard let self else { return }
+            // A key held on this Mac by a client that has since gone quiet.
+            self.injector?.watchdog()
+            guard let encoder = self.encoder else { return }
             guard self.forceKeyframeFlag else { return }
 
             // If frames are still arriving, the capture path will pick the flag

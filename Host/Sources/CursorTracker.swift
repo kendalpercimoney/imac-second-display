@@ -78,6 +78,14 @@ final class CursorTracker {
         imageTimer = image
     }
 
+    /// Sends the position now rather than at the next tick. Called after the
+    /// iMac's own mouse moves the pointer, when the new position is known the
+    /// moment the event is posted and waiting up to 8 ms for the timer to
+    /// notice is pure lag on the thing the eye is following.
+    func sampleNow() {
+        queue.async { [weak self] in self?.samplePosition() }
+    }
+
     func stop() {
         positionTimer?.cancel(); positionTimer = nil
         imageTimer?.cancel(); imageTimer = nil

@@ -14,6 +14,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
 #import "LSAppDelegate.h"
+#import "LSInputForwarder.h"
 #import "LSGLView.h"
 #import "LSReceiver.h"
 #import "LSDecoder.h"
@@ -77,6 +78,19 @@
     double    _incomingMbps;
     BOOL      _sawFirstFrame;
     NSString *_fatalMessage;
+
+    // Keyboard and mouse going to the host.
+    LSInputForwarder *_input;
+    id        _inputMonitor;
+    NSTimer  *_inputStateTimer;
+    BOOL      _inputEnabled;      // -input NO turns the whole thing off
+    BOOL      _pointerCaptured;   // this iMac's pointer hidden and frozen
+    BOOL      _userReleased;      // let go with the key; wait for a click
+    BOOL      _hostAcceptsInput;
+    BOOL      _heardInputStatus;
+    uint8_t   _inputRefusal;
+    NSString *_notice;            // a line shown briefly over the picture
+    NSTimeInterval _noticeUntil;
 }
 
 #pragma mark - launch
@@ -103,6 +117,8 @@
         [[NSRunLoop currentRunLoop] addTimer:_snapshotTimer forMode:NSRunLoopCommonModes];
     }
 
+    [self installInputCapture];
+
     [NSApp activateIgnoringOtherApps:YES];
     [self updateOverlay];
 }
@@ -121,6 +137,7 @@
         @"audioPort"   : @(LS_DEFAULT_AUDIO_PORT),
         @"audio"       : @YES,
         @"maxDraws"    : @0,
+        @"input"       : @YES,
         @"windowed"    : @NO,
         @"vsync"       : @NO,
         @"stats"       : @NO,
@@ -133,6 +150,7 @@
     _audioPort    = (uint16_t)[defaults integerForKey:@"audioPort"];
     _audioEnabled = [defaults boolForKey:@"audio"];
     _fullscreen   = ![defaults boolForKey:@"windowed"];
+    _inputEnabled = [defaults boolForKey:@"input"];
     _statsVisible = [defaults boolForKey:@"stats"];
     // Test hook: render N frames, write a PNG, quit. Lets the render path be
     // verified without anyone having to look at a screen.
@@ -330,6 +348,18 @@
             // there, so this does not need a hop to main.
             [player setVolume:volume];
         };
+        if (_inputEnabled) {
+            _control.canSendInput = YES;
+            LSControlClient *control = _control;
+            _input = [[LSInputForwarder alloc] initWithSender:^(const uint8_t *bytes, size_t length) {
+                [control sendBytes:bytes length:length];
+            }];
+            _control.inputStatusChanged = ^(BOOL accepting, uint8_t reason) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [weakSelf hostInputStatusChanged:accepting reason:reason];
+                });
+            };
+        }
         _control.hostSaidGoodbye = ^{
             // Arrives on the control thread; the UI work has to hop to main.
             [weakSelf performSelectorOnMainThread:@selector(handleHostDisconnected)
@@ -363,6 +393,8 @@
     if (!_sawFirstFrame) return;
     NSLog(@"[LanScreen] host went quiet -- blanking and waiting for it to come back");
     _sawFirstFrame = NO;
+    // Never keep this iMac's mouse and keyboard with nothing on the other end.
+    [self releaseInput];
     // Stop holding the machine awake: with nothing to show, the iMac should be
     // free to sleep on its own schedule.
     [_power endKeepingAwake];
@@ -437,6 +469,7 @@
 /// A stream just started arriving. Light the screen if it has already slept,
 /// and hold it awake for as long as the stream lasts.
 - (void)handleStreamStarted {
+    [self engageInputIfWanted];
     [_power wakeDisplayNow];
     [_power beginKeepingAwake];
     [self updateOverlay];
@@ -603,12 +636,23 @@
         if (_power.statusMessage) [text appendFormat:@"%@\n", _power.statusMessage];
     }
 
-    if ([text length] == 0) {
+    BOOL hasNotice = _notice && [NSDate timeIntervalSinceReferenceDate] < _noticeUntil;
+    if (!hasNotice) _notice = nil;
+
+    if ([text length] == 0 && !hasNotice) {
         [_overlayWindow orderOut:nil];
         return;
     }
 
-    [text appendString:@"\n[S] stats   [V] vsync   [K] keyframe   [F] window   [Q] quit"];
+    if ([text length] > 0) {
+        [text appendString:[_input isEngaged]
+            ? @"\n[Control-Option-Esc] give the keyboard and mouse back to this iMac"
+            : @"\n[S] stats   [V] vsync   [K] keyframe   [F] window   [Q] quit"];
+    }
+    if (hasNotice) {
+        if ([text length] > 0) [text insertString:@"\n\n" atIndex:0];
+        [text insertString:_notice atIndex:0];
+    }
     [_overlayField setStringValue:text];
 
     NSSize size = [[_overlayField cell] cellSizeForBounds:NSMakeRect(0, 0, 900, 400)];
@@ -620,6 +664,208 @@
     if (![_overlayWindow isVisible]) {
         [_window addChildWindow:_overlayWindow ordered:NSWindowAbove];
     }
+}
+
+#pragma mark - keyboard and mouse to the host
+
+/// Takes this iMac's keyboard and mouse events before anything else in the app
+/// sees them.
+///
+/// A local monitor runs ahead of the menu, so Command-Q and Command-W are
+/// caught and sent to the host rather than quitting this app or closing its
+/// window -- while the keyboard belongs to the Mac, it all goes to the Mac.
+/// What it cannot catch is what never reaches an app at all: Command-Tab,
+/// Command-Space, Mission Control. Those stay with this iMac.
+- (void)installInputCapture {
+    if (!_input) return;
+    __unsafe_unretained LSAppDelegate *weakSelf = self;
+    NSUInteger mask = NSMouseMovedMask | NSLeftMouseDraggedMask | NSRightMouseDraggedMask
+        | NSOtherMouseDraggedMask | NSLeftMouseDownMask | NSLeftMouseUpMask
+        | NSRightMouseDownMask | NSRightMouseUpMask | NSOtherMouseDownMask
+        | NSOtherMouseUpMask | NSScrollWheelMask | NSKeyDownMask | NSKeyUpMask
+        | NSFlagsChangedMask;
+    _inputMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:mask
+                                                          handler:^NSEvent *(NSEvent *event) {
+        return [weakSelf routeInputEvent:event];
+    }];
+
+    NSNotificationCenter *centre = [NSNotificationCenter defaultCenter];
+    [centre addObserver:self selector:@selector(windowBecameKey:)
+                   name:NSWindowDidBecomeKeyNotification object:nil];
+    [centre addObserver:self selector:@selector(windowStoppedBeingKey:)
+                   name:NSWindowDidResignKeyNotification object:nil];
+    [centre addObserver:self selector:@selector(appStoppedBeingActive:)
+                   name:NSApplicationDidResignActiveNotification object:nil];
+}
+
+/// nil swallows the event; returning it lets the app have it as usual.
+- (NSEvent *)routeInputEvent:(NSEvent *)event {
+    NSEventType type = [event type];
+
+    if (![_input isEngaged]) {
+        // A click on the picture hands the keyboard and mouse over again. The
+        // click itself is not sent: landing on whatever happens to be under
+        // the Mac's pointer would be a surprise, not a click.
+        BOOL click = type == NSLeftMouseDown || type == NSRightMouseDown
+                  || type == NSOtherMouseDown;
+        if (click && [event window] == _window) {
+            _userReleased = NO;
+            if ([self engageInputIfWanted]) return nil;
+            [self explainInputRefusal];
+        }
+        return event;
+    }
+
+    switch (type) {
+        case NSMouseMoved:
+        case NSLeftMouseDragged:
+        case NSRightMouseDragged:
+        case NSOtherMouseDragged:
+            _input.hostPointsPerViewPoint = _glView.hostPointsPerViewPoint;
+            [_input mouseMovedByX:[event deltaX] y:[event deltaY]];
+            return nil;
+        case NSLeftMouseDown:
+        case NSLeftMouseUp:
+            [_input mouseButton:LS_BUTTON_LEFT down:(type == NSLeftMouseDown)
+                     clickCount:(int)[event clickCount]];
+            return nil;
+        case NSRightMouseDown:
+        case NSRightMouseUp:
+            [_input mouseButton:LS_BUTTON_RIGHT down:(type == NSRightMouseDown)
+                     clickCount:(int)[event clickCount]];
+            return nil;
+        case NSOtherMouseDown:
+        case NSOtherMouseUp:
+            [_input mouseButton:(int)[event buttonNumber] down:(type == NSOtherMouseDown)
+                     clickCount:(int)[event clickCount]];
+            return nil;
+        case NSScrollWheel:
+            [_input scrollByX:[event scrollingDeltaX] y:[event scrollingDeltaY]
+                      precise:[event hasPreciseScrollingDeltas]];
+            return nil;
+        case NSKeyDown:
+            if ([LSInputForwarder isReleaseKey:[event keyCode]
+                                     modifiers:(uint32_t)[event modifierFlags]]) {
+                _userReleased = YES;
+                [self releaseInput];
+                [self showNotice:@"The keyboard and mouse are back on this iMac. "
+                                 @"Click the picture to hand them over again."];
+                return nil;
+            }
+            [_input key:[event keyCode] down:YES repeat:[event isARepeat]
+              modifiers:(uint32_t)[event modifierFlags]];
+            return nil;
+        case NSKeyUp:
+            [_input key:[event keyCode] down:NO repeat:NO
+              modifiers:(uint32_t)[event modifierFlags]];
+            return nil;
+        case NSFlagsChanged:
+            [_input modifiersChanged:(uint32_t)[event modifierFlags] keycode:[event keyCode]];
+            return nil;
+        default:
+            return event;
+    }
+}
+
+/// Only when there is something to control: a picture on screen, this window
+/// in front, a host that has said it will act on input, and no recent "give it
+/// back" from the user.
+- (BOOL)engageInputIfWanted {
+    if (!_input || [_input isEngaged]) return [_input isEngaged];
+    if (_userReleased || !_sawFirstFrame || ![_window isKeyWindow]) return NO;
+    if (![_input engage]) return NO;
+
+    [self capturePointer];
+    [_inputStateTimer invalidate];
+    _inputStateTimer = [NSTimer scheduledTimerWithTimeInterval:0.25
+                                                        target:_input
+                                                      selector:@selector(sendState)
+                                                      userInfo:nil
+                                                       repeats:YES];
+    [[NSRunLoop currentRunLoop] addTimer:_inputStateTimer forMode:NSRunLoopCommonModes];
+    [self showNotice:@"This iMac's keyboard and mouse are controlling the Mac. "
+                     @"Control-Option-Esc gives them back."];
+    return YES;
+}
+
+- (void)releaseInput {
+    [_inputStateTimer invalidate];
+    _inputStateTimer = nil;
+    if ([_input isEngaged]) [_input disengage];
+    [self releasePointer];
+}
+
+/// Parks this iMac's pointer in the middle of the window and freezes it there.
+/// Motion still arrives as deltas, but the pointer itself no longer moves, so
+/// it never reaches this screen's edges or wanders off the window -- the Mac's
+/// pointer is the one being moved, and the client draws that.
+- (void)capturePointer {
+    if (_pointerCaptured) return;
+    NSRect frame = [_window frame];
+    // Quartz puts the origin at the top left of the primary screen, AppKit at
+    // its bottom left.
+    NSRect primary = [[[NSScreen screens] objectAtIndex:0] frame];
+    CGWarpMouseCursorPosition(CGPointMake(NSMidX(frame), NSMaxY(primary) - NSMidY(frame)));
+    CGAssociateMouseAndMouseCursorPosition(false);
+    [NSCursor hide];
+    [_window setAcceptsMouseMovedEvents:YES];
+    _pointerCaptured = YES;
+}
+
+- (void)releasePointer {
+    if (!_pointerCaptured) return;
+    CGAssociateMouseAndMouseCursorPosition(true);
+    [NSCursor unhide];
+    [_window setAcceptsMouseMovedEvents:NO];
+    _pointerCaptured = NO;
+}
+
+- (void)hostInputStatusChanged:(BOOL)accepting reason:(uint8_t)reason {
+    _heardInputStatus = YES;
+    _hostAcceptsInput = accepting;
+    _inputRefusal = reason;
+    _input.hostAccepting = accepting;
+    if (!accepting) {
+        [self releaseInput];
+    } else {
+        [self engageInputIfWanted];
+    }
+}
+
+- (void)explainInputRefusal {
+    if (!_input || _hostAcceptsInput) return;
+    if (!_heardInputStatus) {
+        [self showNotice:@"The Mac has not said it will take keyboard and mouse input. "
+                         @"Its LanScreen may need updating."];
+    } else if (_inputRefusal == LS_INPUT_NEEDS_PERMISSION) {
+        [self showNotice:@"The Mac needs to allow this first: in LanScreen on the Mac, "
+                         @"click Allow next to \"Use the iMac's keyboard and mouse\"."];
+    } else {
+        [self showNotice:@"Keyboard and mouse sharing is switched off on the Mac."];
+    }
+}
+
+/// Becoming the front window is what hands the keyboard and mouse over, so
+/// coming back to it after switching away takes them again, even after a
+/// Control-Option-Esc.
+- (void)windowBecameKey:(NSNotification *)note {
+    if ([note object] != _window) return;
+    _userReleased = NO;
+    [self engageInputIfWanted];
+}
+
+- (void)windowStoppedBeingKey:(NSNotification *)note {
+    if ([note object] == _window) [self releaseInput];
+}
+
+- (void)appStoppedBeingActive:(NSNotification *)note {
+    [self releaseInput];
+}
+
+- (void)showNotice:(NSString *)text {
+    _notice = [text copy];
+    _noticeUntil = [NSDate timeIntervalSinceReferenceDate] + 4.0;
+    [self updateOverlay];
 }
 
 #pragma mark - keys
@@ -654,6 +900,7 @@
 }
 
 - (void)toggleFullscreen {
+    [self releaseInput];
     _fullscreen = !_fullscreen;
     // Rebuilding the window is heavier than restyling it, but restyling a
     // borderless window in place on 10.9 loses the OpenGL surface often enough
@@ -699,6 +946,8 @@
 #pragma mark - shutdown
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
+    [self releaseInput];
+    if (_inputMonitor) { [NSEvent removeMonitor:_inputMonitor]; _inputMonitor = nil; }
     [_tickTimer invalidate];
     _tickTimer = nil;
     [_power endKeepingAwake];

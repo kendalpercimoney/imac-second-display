@@ -489,6 +489,28 @@ struct MenuBarPanel: View {
             VStack(alignment: .leading, spacing: 6) {
                 Toggle("Send the pointer separately", isOn: $settings.forwardCursor)
                     .disabled(controller.isRunning)
+                Toggle("Use the iMac's keyboard and mouse", isOn: $settings.acceptInput)
+                    .onChange(of: settings.acceptInput) { _ in controller.sendClientSettingsNow() }
+                if settings.acceptInput && !controller.inputTrusted {
+                    // Without it every posted event silently goes nowhere, so
+                    // the client is told not to take the iMac's mouse at all.
+                    HStack(spacing: 6) {
+                        Text("Needs Accessibility permission.")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(Aero.red)
+                        Spacer(minLength: 0)
+                        Button("Allow…") { controller.requestInputPermission() }
+                            .buttonStyle(AeroButtonStyle())
+                            .controlSize(.small)
+                    }
+                    .padding(.leading, 2)
+                } else if settings.acceptInput && controller.client.hasSaidHello
+                            && !controller.client.sendsInput {
+                    Text("This client cannot send input. Rebuild it.")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Aero.red)
+                        .padding(.leading, 2)
+                }
                 Toggle("Keep this Mac at full performance", isOn: $settings.preventAppNap)
 
                 if controller.isRunning {

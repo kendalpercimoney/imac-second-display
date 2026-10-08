@@ -60,6 +60,9 @@
 @property (nonatomic, readonly) uint32_t renderMicroseconds;   // rolling average
 /// Completed draws. Only ever read to notice that it has stopped moving.
 @property (nonatomic, readonly) uint32_t framesDrawn;
+/// Host points per point of this view, from the last frame drawn: how much a
+/// movement of the iMac's own mouse is scaled by on its way to the host.
+@property (nonatomic, readonly) double hostPointsPerViewPoint;
 
 /// The longest a single pointer update has taken to hand over.
 ///

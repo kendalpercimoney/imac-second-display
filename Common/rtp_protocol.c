@@ -202,6 +202,89 @@ size_t ls_ctrl_build_stats(uint8_t *dst, size_t cap, const ls_stats *stats)
     return total;
 }
 
+/* ---- input ------------------------------------------------------------- */
+
+size_t ls_ctrl_build_input_move(uint8_t *dst, size_t cap, int16_t dx, int16_t dy)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_MOVE, 4);
+    if (!total) return 0;
+    put_u16(dst + CTRL_HDR + 0, (uint16_t)dx);
+    put_u16(dst + CTRL_HDR + 2, (uint16_t)dy);
+    return total;
+}
+
+size_t ls_ctrl_build_input_button(uint8_t *dst, size_t cap,
+                                  uint8_t button, uint8_t down, uint8_t click_count)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_BUTTON, 3);
+    if (!total) return 0;
+    dst[CTRL_HDR + 0] = button;
+    dst[CTRL_HDR + 1] = down ? 1 : 0;
+    dst[CTRL_HDR + 2] = click_count;
+    return total;
+}
+
+size_t ls_ctrl_build_input_scroll(uint8_t *dst, size_t cap,
+                                  int16_t dx_tenths, int16_t dy_tenths, uint8_t precise)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_SCROLL, 5);
+    if (!total) return 0;
+    put_u16(dst + CTRL_HDR + 0, (uint16_t)dx_tenths);
+    put_u16(dst + CTRL_HDR + 2, (uint16_t)dy_tenths);
+    dst[CTRL_HDR + 4] = precise ? 1 : 0;
+    return total;
+}
+
+size_t ls_ctrl_build_input_key(uint8_t *dst, size_t cap, uint16_t keycode,
+                               uint8_t down, uint8_t repeat, uint32_t modifiers)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_KEY, 8);
+    if (!total) return 0;
+    put_u16(dst + CTRL_HDR + 0, keycode);
+    dst[CTRL_HDR + 2] = down ? 1 : 0;
+    dst[CTRL_HDR + 3] = repeat ? 1 : 0;
+    put_u32(dst + CTRL_HDR + 4, modifiers);
+    return total;
+}
+
+size_t ls_ctrl_build_input_flags(uint8_t *dst, size_t cap,
+                                 uint16_t keycode, uint32_t modifiers)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_FLAGS, 6);
+    if (!total) return 0;
+    put_u16(dst + CTRL_HDR + 0, keycode);
+    put_u32(dst + CTRL_HDR + 2, modifiers);
+    return total;
+}
+
+size_t ls_ctrl_build_input_state(uint8_t *dst, size_t cap, uint8_t engaged,
+                                 uint8_t buttons, uint32_t modifiers,
+                                 const uint8_t held_keys[LS_INPUT_KEY_BITMAP_BYTES])
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_STATE,
+                              6 + LS_INPUT_KEY_BITMAP_BYTES);
+    if (!total) return 0;
+    dst[CTRL_HDR + 0] = engaged ? 1 : 0;
+    dst[CTRL_HDR + 1] = buttons;
+    put_u32(dst + CTRL_HDR + 2, modifiers);
+    if (held_keys) {
+        memcpy(dst + CTRL_HDR + 6, held_keys, LS_INPUT_KEY_BITMAP_BYTES);
+    } else {
+        memset(dst + CTRL_HDR + 6, 0, LS_INPUT_KEY_BITMAP_BYTES);
+    }
+    return total;
+}
+
+size_t ls_ctrl_build_input_status(uint8_t *dst, size_t cap,
+                                  uint8_t accepting, uint8_t reason)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_STATUS, 2);
+    if (!total) return 0;
+    dst[CTRL_HDR + 0] = accepting ? 1 : 0;
+    dst[CTRL_HDR + 1] = reason;
+    return total;
+}
+
 static size_t ctrl_build_token(uint8_t *dst, size_t cap, uint8_t type, uint64_t token)
 {
     size_t total = ctrl_begin(dst, cap, type, 8);
@@ -334,6 +417,60 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
             if (body < 2) return -1;
             out->brightness = get_u16(src + CTRL_HDR + 0);
             if (out->brightness > LS_BRIGHTNESS_SCALE) return -1;
+            return 0;
+
+        case LS_MSG_INPUT_MOVE:
+            if (body < 4) return -1;
+            out->input_dx = (int16_t)get_u16(src + CTRL_HDR + 0);
+            out->input_dy = (int16_t)get_u16(src + CTRL_HDR + 2);
+            return 0;
+
+        case LS_MSG_INPUT_BUTTON:
+            if (body < 3) return -1;
+            out->input_button      = src[CTRL_HDR + 0];
+            out->input_down        = src[CTRL_HDR + 1] ? 1 : 0;
+            out->input_click_count = src[CTRL_HDR + 2];
+            /* 32 is the most buttons CGEvent has numbers for. */
+            if (out->input_button >= 32) return -1;
+            return 0;
+
+        case LS_MSG_INPUT_SCROLL:
+            if (body < 5) return -1;
+            out->input_dx      = (int16_t)get_u16(src + CTRL_HDR + 0);
+            out->input_dy      = (int16_t)get_u16(src + CTRL_HDR + 2);
+            out->input_precise = src[CTRL_HDR + 4] ? 1 : 0;
+            return 0;
+
+        case LS_MSG_INPUT_KEY:
+            if (body < 8) return -1;
+            out->input_keycode   = get_u16(src + CTRL_HDR + 0);
+            out->input_down      = src[CTRL_HDR + 2] ? 1 : 0;
+            out->input_repeat    = src[CTRL_HDR + 3] ? 1 : 0;
+            out->input_modifiers = get_u32(src + CTRL_HDR + 4);
+            /* Virtual keycodes are 7-bit. Anything larger is not a key, and
+             * would also fall outside the held-key bitmap. */
+            if (out->input_keycode >= LS_INPUT_KEY_BITMAP_BYTES * 8) return -1;
+            return 0;
+
+        case LS_MSG_INPUT_FLAGS:
+            if (body < 6) return -1;
+            out->input_keycode   = get_u16(src + CTRL_HDR + 0);
+            out->input_modifiers = get_u32(src + CTRL_HDR + 2);
+            if (out->input_keycode >= LS_INPUT_KEY_BITMAP_BYTES * 8) return -1;
+            return 0;
+
+        case LS_MSG_INPUT_STATE:
+            if (body < 6 + LS_INPUT_KEY_BITMAP_BYTES) return -1;
+            out->input_engaged   = src[CTRL_HDR + 0] ? 1 : 0;
+            out->input_buttons   = src[CTRL_HDR + 1];
+            out->input_modifiers = get_u32(src + CTRL_HDR + 2);
+            memcpy(out->input_held_keys, src + CTRL_HDR + 6, LS_INPUT_KEY_BITMAP_BYTES);
+            return 0;
+
+        case LS_MSG_INPUT_STATUS:
+            if (body < 2) return -1;
+            out->input_accepting = src[CTRL_HDR + 0] ? 1 : 0;
+            out->input_reason    = src[CTRL_HDR + 1];
             return 0;
 
         case LS_MSG_VOLUME:

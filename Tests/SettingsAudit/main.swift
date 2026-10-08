@@ -59,6 +59,7 @@ let controls: [Control] = [
     Control(name: "Video bitrate")         { $0.videoBitrateMbps = $0.videoBitrateMbps == 60 ? 90 : 60 },
     Control(name: "4:2:0 capture")         { $0.captureYUV420.toggle() },
     Control(name: "Send the pointer separately") { $0.forwardCursor.toggle() },
+    Control(name: "Use the iMac's keyboard and mouse") { $0.acceptInput.toggle() },
     Control(name: "Client IP")             { $0.clientAddress = $0.clientAddress == "10.0.0.2" ? "10.0.0.9" : "10.0.0.2" },
     Control(name: "Video port")            { $0.videoPort += 1 },
     Control(name: "Control port")          { $0.controlPort += 1 },

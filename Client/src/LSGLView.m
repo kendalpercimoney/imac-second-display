@@ -62,6 +62,7 @@
     /// has stopped, which is what a frozen picture looks like from the inside
     /// and used to leave no trace at all.
     uint32_t _framesDrawn;
+    double _hostPointsPerViewPoint;
     GLuint _cursorTexture;
     NSData *_pendingCursorImage;
     int _cursorImageWidth, _cursorImageHeight;
@@ -104,6 +105,7 @@
         mach_timebase_info(&_timebase);
         _loggedUnsupportedFormat = 0;
         _texImageFailures = 0;
+        _hostPointsPerViewPoint = 1.0;
         _vsyncEnabled = NO;
         pthread_mutex_init(&_renderMutex, NULL);
         pthread_cond_init(&_renderCond, NULL);
@@ -458,6 +460,10 @@
                         (double)viewHeight / (double)imageHeight);
     double drawWidth  = (double)imageWidth * scale;
     double drawHeight = (double)imageHeight * scale;
+    // Stream pixels are host points, and the view is in points, so this is
+    // how far the host's pointer has to move for each point a hand moves it
+    // across the picture.
+    if (scale > 0) _hostPointsPerViewPoint = 1.0 / scale;
     double originX = ((double)viewWidth - drawWidth) * 0.5;
     double originY = ((double)viewHeight - drawHeight) * 0.5;
 

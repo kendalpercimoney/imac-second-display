@@ -40,6 +40,18 @@
 
 - (void)sendStats:(const ls_stats *)stats;
 
+/// Sends a datagram that has already been built. Used for input, which is
+/// built by LSInputForwarder so that it can be tested without a socket.
+- (void)sendBytes:(const uint8_t *)bytes length:(size_t)length;
+
+/// Whether this build forwards its own keyboard and mouse. Told to the host in
+/// the HELLO.
+@property (nonatomic, assign) BOOL canSendInput;
+
+/// Whether the host will act on input, and if not, why (LS_INPUT_*). Repeated
+/// every couple of seconds. Fires on the control thread.
+@property (nonatomic, copy) void (^inputStatusChanged)(BOOL accepting, uint8_t reason);
+
 /// Fired on the control thread when the host says goodbye.
 /// Playback volume the host wants, 0 to 1. Repeated every couple of seconds,
 /// so a lost one heals itself.

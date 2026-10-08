@@ -192,7 +192,23 @@ enum {
      * the far end, so it tends to arrive late rather than early. */
     LS_MSG_AUDIO_DELAY  = 10,
     /* The iMac's panel brightness. The screen is over there; the slider is not. */
-    LS_MSG_BRIGHTNESS   = 11
+    LS_MSG_BRIGHTNESS   = 11,
+    /* Input, client -> host, so the iMac's own keyboard and mouse drive the
+     * Mac it is a display for. Only honoured from the address that said HELLO:
+     * this is keystroke injection, and a UDP port on a LAN is not an identity. */
+    LS_MSG_INPUT_MOVE   = 12, /* relative pointer motion, host points          */
+    LS_MSG_INPUT_BUTTON = 13, /* a mouse button went down or up                */
+    LS_MSG_INPUT_SCROLL = 14, /* wheel or trackpad scroll                      */
+    LS_MSG_INPUT_KEY    = 15, /* a non-modifier key went down or up            */
+    LS_MSG_INPUT_FLAGS  = 16, /* a modifier key changed the modifier state     */
+    /* Everything currently held, several times a second while input is being
+     * forwarded. UDP loses the odd datagram, and a lost key-up is a key held
+     * down on the host forever; this is what lets the host notice and let go.
+     * engaged = 0 means release everything. */
+    LS_MSG_INPUT_STATE  = 17,
+    /* host -> client: whether input will be acted on, so the client does not
+     * take the iMac's mouse away from it for nothing. */
+    LS_MSG_INPUT_STATUS = 18
 };
 
 /* Volume is carried as thousandths, so 1000 is unity and 0 is silence. An
@@ -225,6 +241,19 @@ enum {
  * brightness control out and says why, rather than moving a slider that does
  * nothing at the far end. */
 #define LS_CLIENT_FLAG_SETS_BRIGHTNESS 0x0004u
+/* This client can forward its own keyboard and mouse. */
+#define LS_CLIENT_FLAG_SENDS_INPUT  0x0008u
+
+/* INPUT_STATUS reasons. */
+#define LS_INPUT_OK              0
+#define LS_INPUT_OFF_IN_SETTINGS 1
+#define LS_INPUT_NEEDS_PERMISSION 2
+
+/* Mouse buttons, as both the index in INPUT_BUTTON and bits in a mask. */
+#define LS_BUTTON_LEFT   0
+#define LS_BUTTON_RIGHT  1
+#define LS_BUTTON_MIDDLE 2
+#define LS_INPUT_KEY_BITMAP_BYTES 16   /* virtual keycodes 0-127 */
 
 /* Client-reported counters. All cumulative since the client started, except
  * the *_us fields which are rolling averages over the last reporting period. */
@@ -292,6 +321,28 @@ typedef struct {
     int16_t  audio_delay_ms;
     /* BRIGHTNESS: thousandths, 0 to LS_BRIGHTNESS_SCALE. */
     uint16_t brightness;
+
+    /* INPUT_MOVE: host points. INPUT_SCROLL: tenths of a line or a pixel. */
+    int16_t  input_dx;
+    int16_t  input_dy;
+    /* INPUT_BUTTON */
+    uint8_t  input_button;
+    uint8_t  input_down;
+    uint8_t  input_click_count;
+    /* INPUT_SCROLL: 1 for pixel-precise (trackpad), 0 for wheel lines. */
+    uint8_t  input_precise;
+    /* INPUT_KEY / INPUT_FLAGS: macOS virtual keycode, and the modifier flags
+     * (NSEvent / CGEventFlags device-independent bits) in force after it. */
+    uint16_t input_keycode;
+    uint8_t  input_repeat;
+    uint32_t input_modifiers;
+    /* INPUT_STATE */
+    uint8_t  input_engaged;
+    uint8_t  input_buttons;     /* bit per LS_BUTTON_*                        */
+    uint8_t  input_held_keys[LS_INPUT_KEY_BITMAP_BYTES];
+    /* INPUT_STATUS */
+    uint8_t  input_accepting;
+    uint8_t  input_reason;
 } ls_ctrl_message;
 
 /* Each builder returns the number of bytes written, or 0 if cap was too small.
@@ -320,6 +371,21 @@ size_t ls_ctrl_build_audio_delay(uint8_t *dst, size_t cap, int16_t delay_ms);
 
 /* Clamped to LS_BRIGHTNESS_SCALE. */
 size_t ls_ctrl_build_brightness(uint8_t *dst, size_t cap, uint16_t brightness);
+
+size_t ls_ctrl_build_input_move(uint8_t *dst, size_t cap, int16_t dx, int16_t dy);
+size_t ls_ctrl_build_input_button(uint8_t *dst, size_t cap,
+                                  uint8_t button, uint8_t down, uint8_t click_count);
+size_t ls_ctrl_build_input_scroll(uint8_t *dst, size_t cap,
+                                  int16_t dx_tenths, int16_t dy_tenths, uint8_t precise);
+size_t ls_ctrl_build_input_key(uint8_t *dst, size_t cap, uint16_t keycode,
+                               uint8_t down, uint8_t repeat, uint32_t modifiers);
+size_t ls_ctrl_build_input_flags(uint8_t *dst, size_t cap,
+                                 uint16_t keycode, uint32_t modifiers);
+size_t ls_ctrl_build_input_state(uint8_t *dst, size_t cap, uint8_t engaged,
+                                 uint8_t buttons, uint32_t modifiers,
+                                 const uint8_t held_keys[LS_INPUT_KEY_BITMAP_BYTES]);
+size_t ls_ctrl_build_input_status(uint8_t *dst, size_t cap,
+                                  uint8_t accepting, uint8_t reason);
 
 /* `cap` must be at least LS_CTRL_MAX_PACKET. Returns 0 if the bitmap is larger
  * than LS_CURSOR_MAX_IMAGE_BYTES. */

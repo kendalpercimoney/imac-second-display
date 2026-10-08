@@ -216,7 +216,9 @@
                                    (uint16_t)(LS_CLIENT_FLAG_DRAWS_CURSOR
                                               | LS_CLIENT_FLAG_PLAYS_AUDIO
                                               | (_canSetBrightness
-                                                 ? LS_CLIENT_FLAG_SETS_BRIGHTNESS : 0)),
+                                                 ? LS_CLIENT_FLAG_SETS_BRIGHTNESS : 0)
+                                              | (_canSendInput
+                                                 ? LS_CLIENT_FLAG_SENDS_INPUT : 0)),
                                    _haveLocalMAC ? _localMAC : NULL);
     [self sendBytes:buffer length:n];
 }
@@ -333,6 +335,13 @@
                     if (self.brightnessChanged) {
                         self.brightnessChanged((float)message.brightness /
                                                (float)LS_BRIGHTNESS_SCALE);
+                    }
+                    break;
+
+                case LS_MSG_INPUT_STATUS:
+                    if (self.inputStatusChanged) {
+                        self.inputStatusChanged(message.input_accepting != 0,
+                                                message.input_reason);
                     }
                     break;
 

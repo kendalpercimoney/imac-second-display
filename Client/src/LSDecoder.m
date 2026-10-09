@@ -14,6 +14,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
 #import "LSDecoder.h"
+#import "LSDecodeQueue.h"
 #import <VideoToolbox/VideoToolbox.h>
 #import <CoreMedia/CoreMedia.h>
 #include "rtp_protocol.h"
@@ -63,7 +64,7 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
     NSData *_activeSPS;
     NSData *_activePPS;
 
-    NSMutableArray *_queue;
+    LSDecodeQueue *_queue;
     pthread_mutex_t _mutex;
     pthread_cond_t  _cond;
     NSThread *_thread;
@@ -81,7 +82,10 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
 - (id)init {
     self = [super init];
     if (self) {
-        _queue = [[NSMutableArray alloc] init];
+        // Two waiting frames at most. Anything deeper is latency we would have
+        // to pay back later -- and the queue refuses, rather than corrupts,
+        // whatever does not fit.
+        _queue = [[LSDecodeQueue alloc] initWithDepth:2];
         pthread_mutex_init(&_mutex, NULL);
         pthread_cond_init(&_cond, NULL);
         mach_timebase_info(&_timebase);
@@ -141,6 +145,7 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
                      sps:(NSData *)sps
                      pps:(NSData *)pps
                timestamp:(uint32_t)timestamp
+              isKeyframe:(BOOL)isKeyframe
 {
     LSAccessUnit *unit = [[LSAccessUnit alloc] init];
     unit.avcc = avcc;
@@ -149,15 +154,19 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
     unit.timestamp = timestamp;
 
     pthread_mutex_lock(&_mutex);
-    // Depth 2. Anything deeper is latency we would have to pay back later.
-    while ([_queue count] >= 2) {
-        [_queue removeObjectAtIndex:0];
-        _framesDropped++;
-    }
-    [_queue addObject:unit];
+    [_queue push:unit isKeyframe:isKeyframe];
+    _framesDropped = [_queue dropped];
+    _queueOverflows = [_queue overflows];
     _queueDepth = (uint32_t)[_queue count];
+    BOOL needKeyframe = [_queue waitingForKeyframe];
     pthread_cond_signal(&_cond);
     pthread_mutex_unlock(&_mutex);
+
+    // On every frame refused while waiting, not just the first: the request is
+    // one UDP datagram, and if it is lost the alternative is waiting for the
+    // host's next scheduled keyframe, seconds away. The control channel limits
+    // these to ten a second.
+    if (needKeyframe && self.keyframeNeeded) self.keyframeNeeded();
 }
 
 #pragma mark - decode thread
@@ -171,8 +180,7 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
             pthread_cond_wait(&_cond, &_mutex);
         }
         if (!_running) { pthread_mutex_unlock(&_mutex); break; }
-        unit = [_queue objectAtIndex:0];
-        [_queue removeObjectAtIndex:0];
+        unit = [_queue pop];
         _queueDepth = (uint32_t)[_queue count];
         pthread_mutex_unlock(&_mutex);
 
@@ -354,6 +362,14 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
         if (status == kVTInvalidSessionErr) {
             [self teardownSession];
         }
+        // Either way, what it is holding as the previous picture is suspect,
+        // and decoding the next frame on top of it is how moshing starts.
+        pthread_mutex_lock(&_mutex);
+        [_queue decodeFailed];
+        _framesDropped = [_queue dropped];
+        _queueDepth = (uint32_t)[_queue count];
+        pthread_mutex_unlock(&_mutex);
+        if (self.keyframeNeeded) self.keyframeNeeded();
     }
 }
 

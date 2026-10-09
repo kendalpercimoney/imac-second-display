@@ -506,6 +506,44 @@ is nothing. Wrapping the body in one, to stop a 718-point panel running off the
 bottom of a laptop screen, made the panel stop appearing at all. The way to make
 it fit is for it to be shorter.
 
+### Moshing: decoding a frame whose predecessor was thrown away
+
+Every frame after a keyframe is a set of changes to the one before it. The
+decode queue kept latency down by throwing away its oldest waiting frame when
+decoding fell behind — and then decoding the next frame anyway, applying its
+changes to a picture they were never meant for. The damage is copied forward
+into every frame until the next keyframe, up to five seconds later: blocks
+smeared and dragged across the picture. Decoding falls behind on exactly the
+frames scrolling and zooming produce, which is when it was seen.
+
+Measured with real frames really decoded, each scored against what it should
+have been (`./Tests/run_decoder_drop_test.sh`, a scrolling 1280x720 page):
+
+| | worst frame shown | damaged frames shown |
+|---|---|---|
+| decode everything | 38.9 dB | 0 |
+| drop one frame, carry on (as it was) | **16.7 dB** | **49**, until the keyframe |
+| drop one frame, wait for a keyframe (now) | 38.9 dB | 0 |
+
+The rule now is that a frame is never decoded unless the one before it was.
+When the queue is full, the newest frame is refused rather than the oldest, so
+the frames already waiting — a complete chain — still decode correctly, and
+nothing after the gap is decoded until a keyframe arrives. The client asks for
+one at once, and again for every frame refused until it comes, because a lost
+request would otherwise mean waiting for the host's own schedule. A frame the
+decoder rejects is treated the same way. A keyframe also overtakes anything
+still waiting ahead of it, which could only put the picture further behind.
+
+The cost is the picture holding still for a round trip instead of being wrong
+for seconds. In the panel, Dropped counts the frames this refuses. If it climbs
+while scrolling, the iMac cannot decode the stream fast enough — and the
+Decoder readout says whether that is because it has fallen back to software.
+
+The loopback harness now answers keyframe requests the way the host does, so it
+exercises that recovery instead of waiting for a scheduled keyframe that a
+short run never reaches. It counts how often decoding fell behind rather than
+how many frames that cost, since one overflow now refuses a run of them.
+
 ### Looking for a twelve-hour freeze
 
 The client stopped after about twelve hours, with no crash and nothing in the
@@ -725,6 +763,44 @@ no height of its own to give it — it fills what it is handed, which in a popov
 is nothing. Wrapping the body in one, to stop a 718-point panel running off the
 bottom of a laptop screen, made the panel stop appearing at all. The way to make
 it fit is for it to be shorter.
+
+### Moshing: decoding a frame whose predecessor was thrown away
+
+Every frame after a keyframe is a set of changes to the one before it. The
+decode queue kept latency down by throwing away its oldest waiting frame when
+decoding fell behind — and then decoding the next frame anyway, applying its
+changes to a picture they were never meant for. The damage is copied forward
+into every frame until the next keyframe, up to five seconds later: blocks
+smeared and dragged across the picture. Decoding falls behind on exactly the
+frames scrolling and zooming produce, which is when it was seen.
+
+Measured with real frames really decoded, each scored against what it should
+have been (`./Tests/run_decoder_drop_test.sh`, a scrolling 1280x720 page):
+
+| | worst frame shown | damaged frames shown |
+|---|---|---|
+| decode everything | 38.9 dB | 0 |
+| drop one frame, carry on (as it was) | **16.7 dB** | **49**, until the keyframe |
+| drop one frame, wait for a keyframe (now) | 38.9 dB | 0 |
+
+The rule now is that a frame is never decoded unless the one before it was.
+When the queue is full, the newest frame is refused rather than the oldest, so
+the frames already waiting — a complete chain — still decode correctly, and
+nothing after the gap is decoded until a keyframe arrives. The client asks for
+one at once, and again for every frame refused until it comes, because a lost
+request would otherwise mean waiting for the host's own schedule. A frame the
+decoder rejects is treated the same way. A keyframe also overtakes anything
+still waiting ahead of it, which could only put the picture further behind.
+
+The cost is the picture holding still for a round trip instead of being wrong
+for seconds. In the panel, Dropped counts the frames this refuses. If it climbs
+while scrolling, the iMac cannot decode the stream fast enough — and the
+Decoder readout says whether that is because it has fallen back to software.
+
+The loopback harness now answers keyframe requests the way the host does, so it
+exercises that recovery instead of waiting for a scheduled keyframe that a
+short run never reaches. It counts how often decoding fell behind rather than
+how many frames that cost, since one overflow now refuses a run of them.
 
 ### Looking for a twelve-hour freeze
 

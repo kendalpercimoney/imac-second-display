@@ -57,6 +57,7 @@ xcrun clang -fobjc-arc -O1 -Wall -Wno-unused-parameter -Wno-deprecated-declarati
     "$ROOT/Client/src/LSReceiver.m" \
     "$ROOT/Client/src/LSDepacketizer.m" \
     "$ROOT/Client/src/LSDecoder.m" \
+    "$ROOT/Client/src/LSDecodeQueue.m" \
     "$ROOT/Tests/loopreceive.m" \
     -o "$OUT/lsloopreceive"
 

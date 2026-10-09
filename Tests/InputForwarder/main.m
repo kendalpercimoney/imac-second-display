@@ -24,9 +24,12 @@
 #include "rtp_protocol.h"
 
 static int failures = 0;
+// The condition is evaluated once: several of these call -engage, and
+// evaluating it a second time to count would engage twice.
 #define CHECK(cond, what) do { \
-    printf("  %s %s\n", (cond) ? "ok  " : "FAIL", what); \
-    if (!(cond)) failures++; \
+    BOOL ok_ = (cond); \
+    printf("  %s %s\n", ok_ ? "ok  " : "FAIL", what); \
+    if (!ok_) failures++; \
 } while (0)
 
 static NSMutableArray *gSent;

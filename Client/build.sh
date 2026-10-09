@@ -130,6 +130,7 @@ SOURCES=(
     "$ROOT/Client/src/LSGLView.m"
     "$ROOT/Client/src/LSReceiver.m"
     "$ROOT/Client/src/LSDecoder.m"
+    "$ROOT/Client/src/LSDecodeQueue.m"
     "$ROOT/Client/src/LSDepacketizer.m"
     "$ROOT/Client/src/LSControlClient.m"
     "$ROOT/Client/src/LSPowerManager.m"

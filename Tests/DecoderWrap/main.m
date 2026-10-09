@@ -132,8 +132,16 @@ int main(int argc, const char **argv) {
         uint32_t previous = timestamp;
 
         for (int i = 0; i < framesEitherSide * 2; i++) {
-            NSData *unit = gEncoded[(NSUInteger)(i % (int)[gEncoded count])];
-            [decoder submitAccessUnit:unit sps:gSPS pps:gPPS timestamp:timestamp];
+            NSUInteger index = (NSUInteger)(i % (int)[gEncoded count]);
+            NSData *unit = gEncoded[index];
+            // Never ahead of the decoder. This is about the timestamp, not
+            // throughput, and the queue refuses everything up to the next
+            // keyframe once it overflows -- which in a twelve-frame replay can
+            // be eleven frames, and made the frame counts here depend on how
+            // busy the machine happened to be.
+            while (decoder.queueDepth > 0) usleep(200);
+            [decoder submitAccessUnit:unit sps:gSPS pps:gPPS timestamp:timestamp
+                           isKeyframe:(index == 0)];
             previous = timestamp;
             timestamp += step;
             if (timestamp < previous) {
@@ -153,14 +161,16 @@ int main(int argc, const char **argv) {
                emittedBeforeWrap, after);
 
         int failures = 0;
-        #define CHECK(what, ok) do { \
-            printf("  %s %s\n", (ok) ? "ok  " : "FAIL", what); \
-            if (!(ok)) failures++; \
+        #define CHECK(what, cond) do { \
+            BOOL ok_ = (cond); \
+            printf("  %s %s\n", ok_ ? "ok  " : "FAIL", what); \
+            if (!ok_) failures++; \
         } while (0)
 
         CHECK("the run actually crossed the wrap", wrapped);
         CHECK("frames came out before it", emittedBeforeWrap > 250);
         CHECK("frames kept coming out after it", after > 250);
+        CHECK("not one was dropped, so the counts mean something", decoder.framesDropped == 0);
         CHECK("the decoder did not stall at the wrap",
               after > emittedBeforeWrap / 2);
         CHECK("nothing was left stuck in the queue", decoder.queueDepth == 0);

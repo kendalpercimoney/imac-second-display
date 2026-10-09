@@ -147,6 +147,36 @@ if !encoder.warnings.isEmpty {
     FileHandle.standardError.write("encoder hints declined: \(encoder.warnings)\n".data(using: .utf8)!)
 }
 
+// Keyframes on request, on the port above the video one, the way the real host
+// answers the client's control channel. Without it this harness could not
+// model how the client recovers once decoding falls behind: it stops decoding
+// until a keyframe -- carrying on is what moshes the picture -- and asks for
+// one, and a sender that never answers leaves it waiting for the next
+// scheduled keyframe, which in a short run never comes.
+let keyframeLock = NSLock()
+var keyframeAsked = false
+let keyframeSocket = try? UDPBoundSocket(port: port &+ 1, recvBufferBytes: 64 * 1024)
+if let keyframeSocket {
+    Thread.detachNewThread {
+        var buffer = [UInt8](repeating: 0, count: 64)
+        var from = sockaddr_in()
+        while true {
+            let n = buffer.withUnsafeMutableBytes {
+                keyframeSocket.receive(into: $0.baseAddress!, capacity: $0.count, from: &from)
+            }
+            if n < 0 { break }
+            keyframeLock.lock(); keyframeAsked = true; keyframeLock.unlock()
+        }
+    }
+}
+func takeKeyframeRequest() -> Bool {
+    keyframeLock.lock(); defer { keyframeLock.unlock() }
+    let asked = keyframeAsked
+    keyframeAsked = false
+    return asked
+}
+var keyframesOnRequest = 0
+
 // Generate up front: the pixel-filling loop below is plain Swift and slow, and
 // it has no business sitting inside the timed path.
 var frames = (0..<min(frameCount, 60)).map { makeFrame($0) }
@@ -158,11 +188,15 @@ for index in 0..<frameCount {
     // ends of this test share that clock, so the receiver can measure true
     // end-to-end pipeline latency.
     let pts = CMClockGetTime(CMClockGetHostTimeClock())
-    encoder.encode(pixelBuffer: pixelBuffer, presentationTime: pts, forceKeyframe: index == 0)
+    let asked = takeKeyframeRequest()
+    if asked && index > 0 { keyframesOnRequest += 1 }
+    encoder.encode(pixelBuffer: pixelBuffer, presentationTime: pts,
+                   forceKeyframe: index == 0 || asked)
     usleep(UInt32(1_000_000 / fps))
 }
 
 _ = done.wait(timeout: .now() + 10)
 encoder.stop()
 
-print("sent \(emitted) frames, \(packetizer.packetsSent) packets, \(packetizer.bytesSent) bytes")
+print("sent \(emitted) frames, \(packetizer.packetsSent) packets, \(packetizer.bytesSent) bytes, "
+      + "\(keyframesOnRequest) keyframes on request")

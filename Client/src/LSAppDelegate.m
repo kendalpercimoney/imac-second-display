@@ -285,6 +285,13 @@
         // Ownership moves into the view, which releases it when it is replaced.
         [view presentPixelBuffer:pixelBuffer];
     };
+    // A gap in what was decoded can only be repaired by a keyframe, and the
+    // host's own schedule puts the next one seconds away. The control channel
+    // may not exist yet at this point, so look it up when it is needed.
+    __unsafe_unretained LSAppDelegate *decoderOwner = self;
+    _decoder.keyframeNeeded = ^{
+        [decoderOwner->_control requestKeyframe];
+    };
     [_decoder start];
 
     NSError *error = nil;
@@ -463,7 +470,8 @@
         [self performSelectorOnMainThread:@selector(handleStreamStarted)
                                withObject:nil waitUntilDone:NO];
     }
-    [_decoder submitAccessUnit:avcc sps:sps pps:pps timestamp:timestamp];
+    [_decoder submitAccessUnit:avcc sps:sps pps:pps timestamp:timestamp
+                    isKeyframe:isKeyframe];
 }
 
 /// A stream just started arriving. Light the screen if it has already slept,

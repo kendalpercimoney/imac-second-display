@@ -41,6 +41,7 @@ xcrun clang -fobjc-arc -O1 -Wall -Wno-unused-parameter \
     -framework CoreMedia -framework CoreVideo \
     "$ROOT/Common/rtp_protocol.c" \
     "$ROOT/Client/src/LSDecoder.m" \
+    "$ROOT/Client/src/LSDecodeQueue.m" \
     "$ROOT/Tests/DecoderWrap/main.m" \
     -o "$OUT/lswrap"
 

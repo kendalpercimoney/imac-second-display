@@ -141,7 +141,7 @@ size_t ls_rtp_write_fu_a_prefix(uint8_t *dst, size_t cap,
 static size_t ctrl_begin(uint8_t *dst, size_t cap, uint8_t type, size_t body)
 {
     size_t total = CTRL_HDR + body;
-    if (!dst || cap < total || total > LS_CTRL_MAX_SIZE) return 0;
+    if (!dst || cap < total || total > LS_CTRL_MAX_PACKET) return 0;
     put_u32(dst, LS_CTRL_MAGIC);
     dst[4] = type;
     dst[5] = 0;
@@ -185,7 +185,7 @@ size_t ls_ctrl_build_stats(uint8_t *dst, size_t cap, const ls_stats *stats)
 {
     size_t total;
     if (!stats) return 0;
-    total = ctrl_begin(dst, cap, LS_MSG_STATS, 32);
+    total = ctrl_begin(dst, cap, LS_MSG_STATS, 48);
     if (!total) return 0;
     put_u32(dst + CTRL_HDR +  0, stats->frames_decoded);
     put_u32(dst + CTRL_HDR +  4, stats->frames_dropped);
@@ -195,6 +195,93 @@ size_t ls_ctrl_build_stats(uint8_t *dst, size_t cap, const ls_stats *stats)
     put_u32(dst + CTRL_HDR + 20, stats->decode_us);
     put_u32(dst + CTRL_HDR + 24, stats->render_us);
     put_u32(dst + CTRL_HDR + 28, stats->queue_depth);
+    put_u32(dst + CTRL_HDR + 32, stats->audio_underruns);
+    put_u32(dst + CTRL_HDR + 36, stats->audio_overruns);
+    put_u32(dst + CTRL_HDR + 40, stats->audio_buffered_us);
+    put_u32(dst + CTRL_HDR + 44, stats->decoder_flags);
+    return total;
+}
+
+/* ---- input ------------------------------------------------------------- */
+
+size_t ls_ctrl_build_input_move(uint8_t *dst, size_t cap, int16_t dx, int16_t dy)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_MOVE, 4);
+    if (!total) return 0;
+    put_u16(dst + CTRL_HDR + 0, (uint16_t)dx);
+    put_u16(dst + CTRL_HDR + 2, (uint16_t)dy);
+    return total;
+}
+
+size_t ls_ctrl_build_input_button(uint8_t *dst, size_t cap,
+                                  uint8_t button, uint8_t down, uint8_t click_count)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_BUTTON, 3);
+    if (!total) return 0;
+    dst[CTRL_HDR + 0] = button;
+    dst[CTRL_HDR + 1] = down ? 1 : 0;
+    dst[CTRL_HDR + 2] = click_count;
+    return total;
+}
+
+size_t ls_ctrl_build_input_scroll(uint8_t *dst, size_t cap,
+                                  int16_t dx_tenths, int16_t dy_tenths, uint8_t precise)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_SCROLL, 5);
+    if (!total) return 0;
+    put_u16(dst + CTRL_HDR + 0, (uint16_t)dx_tenths);
+    put_u16(dst + CTRL_HDR + 2, (uint16_t)dy_tenths);
+    dst[CTRL_HDR + 4] = precise ? 1 : 0;
+    return total;
+}
+
+size_t ls_ctrl_build_input_key(uint8_t *dst, size_t cap, uint16_t keycode,
+                               uint8_t down, uint8_t repeat, uint32_t modifiers)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_KEY, 8);
+    if (!total) return 0;
+    put_u16(dst + CTRL_HDR + 0, keycode);
+    dst[CTRL_HDR + 2] = down ? 1 : 0;
+    dst[CTRL_HDR + 3] = repeat ? 1 : 0;
+    put_u32(dst + CTRL_HDR + 4, modifiers);
+    return total;
+}
+
+size_t ls_ctrl_build_input_flags(uint8_t *dst, size_t cap,
+                                 uint16_t keycode, uint32_t modifiers)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_FLAGS, 6);
+    if (!total) return 0;
+    put_u16(dst + CTRL_HDR + 0, keycode);
+    put_u32(dst + CTRL_HDR + 2, modifiers);
+    return total;
+}
+
+size_t ls_ctrl_build_input_state(uint8_t *dst, size_t cap, uint8_t engaged,
+                                 uint8_t buttons, uint32_t modifiers,
+                                 const uint8_t held_keys[LS_INPUT_KEY_BITMAP_BYTES])
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_STATE,
+                              6 + LS_INPUT_KEY_BITMAP_BYTES);
+    if (!total) return 0;
+    dst[CTRL_HDR + 0] = engaged ? 1 : 0;
+    dst[CTRL_HDR + 1] = buttons;
+    put_u32(dst + CTRL_HDR + 2, modifiers);
+    if (held_keys) {
+        memcpy(dst + CTRL_HDR + 6, held_keys, LS_INPUT_KEY_BITMAP_BYTES);
+    } else {
+        memset(dst + CTRL_HDR + 6, 0, LS_INPUT_KEY_BITMAP_BYTES);
+    }
+    return total;
+}
+
+size_t ls_ctrl_build_input_status(uint8_t *dst, size_t cap,
+                                  uint8_t accepting, uint8_t reason)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_INPUT_STATUS, 2);
+    if (!total) return 0;
+    dst[CTRL_HDR + 0] = accepting ? 1 : 0;
+    dst[CTRL_HDR + 1] = reason;
     return total;
 }
 
@@ -216,6 +303,73 @@ size_t ls_ctrl_build_pong(uint8_t *dst, size_t cap, uint64_t token)
     return ctrl_build_token(dst, cap, LS_MSG_PONG, token);
 }
 
+size_t ls_ctrl_build_cursor(uint8_t *dst, size_t cap,
+                            uint16_t x, uint16_t y,
+                            uint8_t visible, uint16_t image_id)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_CURSOR, 8);
+    if (!total) return 0;
+    put_u16(dst + CTRL_HDR + 0, x);
+    put_u16(dst + CTRL_HDR + 2, y);
+    dst[CTRL_HDR + 4] = visible ? 1 : 0;
+    dst[CTRL_HDR + 5] = 0;
+    put_u16(dst + CTRL_HDR + 6, image_id);
+    return total;
+}
+
+size_t ls_ctrl_build_volume(uint8_t *dst, size_t cap, uint16_t volume)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_VOLUME, 2);
+    if (!total) return 0;
+    if (volume > LS_VOLUME_SCALE) volume = LS_VOLUME_SCALE;
+    put_u16(dst + CTRL_HDR + 0, volume);
+    return total;
+}
+
+size_t ls_ctrl_build_audio_delay(uint8_t *dst, size_t cap, int16_t delay_ms)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_AUDIO_DELAY, 2);
+    if (!total) return 0;
+    if (delay_ms < LS_AUDIO_DELAY_MIN_MS) delay_ms = LS_AUDIO_DELAY_MIN_MS;
+    if (delay_ms > LS_AUDIO_DELAY_MAX_MS) delay_ms = LS_AUDIO_DELAY_MAX_MS;
+    /* Two's complement through an unsigned field: both ends are C, and the
+     * cast back on parse is the exact inverse. */
+    put_u16(dst + CTRL_HDR + 0, (uint16_t)delay_ms);
+    return total;
+}
+
+size_t ls_ctrl_build_brightness(uint8_t *dst, size_t cap, uint16_t brightness)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_BRIGHTNESS, 2);
+    if (!total) return 0;
+    if (brightness > LS_BRIGHTNESS_SCALE) brightness = LS_BRIGHTNESS_SCALE;
+    put_u16(dst + CTRL_HDR + 0, brightness);
+    return total;
+}
+
+size_t ls_ctrl_build_cursor_image(uint8_t *dst, size_t cap,
+                                  uint16_t image_id,
+                                  uint16_t width, uint16_t height,
+                                  uint16_t hotspot_x, uint16_t hotspot_y,
+                                  const uint8_t *rgba, uint32_t rgba_length)
+{
+    size_t total;
+    if (!rgba || width == 0 || height == 0) return 0;
+    if (rgba_length > LS_CURSOR_MAX_IMAGE_BYTES) return 0;
+    if ((uint32_t)width * (uint32_t)height * 4u != rgba_length) return 0;
+
+    total = ctrl_begin(dst, cap, LS_MSG_CURSOR_IMAGE, 12 + rgba_length);
+    if (!total) return 0;
+    put_u16(dst + CTRL_HDR + 0, image_id);
+    put_u16(dst + CTRL_HDR + 2, width);
+    put_u16(dst + CTRL_HDR + 4, height);
+    put_u16(dst + CTRL_HDR + 6, hotspot_x);
+    put_u16(dst + CTRL_HDR + 8, hotspot_y);
+    put_u16(dst + CTRL_HDR + 10, 0);
+    memcpy(dst + CTRL_HDR + 12, rgba, rgba_length);
+    return total;
+}
+
 int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
 {
     uint16_t total;
@@ -226,7 +380,7 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
     if (get_u32(src) != LS_CTRL_MAGIC) return -1;
 
     total = get_u16(src + 6);
-    if (total < CTRL_HDR || (size_t)total > len || total > LS_CTRL_MAX_SIZE) return -1;
+    if (total < CTRL_HDR || (size_t)total > len || total > LS_CTRL_MAX_PACKET) return -1;
     body = (size_t)total - CTRL_HDR;
 
     type = src[4];
@@ -250,6 +404,83 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
         case LS_MSG_KEYFRAME_REQ:
             return 0;
 
+        case LS_MSG_AUDIO_DELAY: {
+            int16_t delay;
+            if (body < 2) return -1;
+            delay = (int16_t)get_u16(src + CTRL_HDR + 0);
+            if (delay < LS_AUDIO_DELAY_MIN_MS || delay > LS_AUDIO_DELAY_MAX_MS) return -1;
+            out->audio_delay_ms = delay;
+            return 0;
+        }
+
+        case LS_MSG_BRIGHTNESS:
+            if (body < 2) return -1;
+            out->brightness = get_u16(src + CTRL_HDR + 0);
+            if (out->brightness > LS_BRIGHTNESS_SCALE) return -1;
+            return 0;
+
+        case LS_MSG_INPUT_MOVE:
+            if (body < 4) return -1;
+            out->input_dx = (int16_t)get_u16(src + CTRL_HDR + 0);
+            out->input_dy = (int16_t)get_u16(src + CTRL_HDR + 2);
+            return 0;
+
+        case LS_MSG_INPUT_BUTTON:
+            if (body < 3) return -1;
+            out->input_button      = src[CTRL_HDR + 0];
+            out->input_down        = src[CTRL_HDR + 1] ? 1 : 0;
+            out->input_click_count = src[CTRL_HDR + 2];
+            /* 32 is the most buttons CGEvent has numbers for. */
+            if (out->input_button >= 32) return -1;
+            return 0;
+
+        case LS_MSG_INPUT_SCROLL:
+            if (body < 5) return -1;
+            out->input_dx      = (int16_t)get_u16(src + CTRL_HDR + 0);
+            out->input_dy      = (int16_t)get_u16(src + CTRL_HDR + 2);
+            out->input_precise = src[CTRL_HDR + 4] ? 1 : 0;
+            return 0;
+
+        case LS_MSG_INPUT_KEY:
+            if (body < 8) return -1;
+            out->input_keycode   = get_u16(src + CTRL_HDR + 0);
+            out->input_down      = src[CTRL_HDR + 2] ? 1 : 0;
+            out->input_repeat    = src[CTRL_HDR + 3] ? 1 : 0;
+            out->input_modifiers = get_u32(src + CTRL_HDR + 4);
+            /* Virtual keycodes are 7-bit. Anything larger is not a key, and
+             * would also fall outside the held-key bitmap. */
+            if (out->input_keycode >= LS_INPUT_KEY_BITMAP_BYTES * 8) return -1;
+            return 0;
+
+        case LS_MSG_INPUT_FLAGS:
+            if (body < 6) return -1;
+            out->input_keycode   = get_u16(src + CTRL_HDR + 0);
+            out->input_modifiers = get_u32(src + CTRL_HDR + 2);
+            if (out->input_keycode >= LS_INPUT_KEY_BITMAP_BYTES * 8) return -1;
+            return 0;
+
+        case LS_MSG_INPUT_STATE:
+            if (body < 6 + LS_INPUT_KEY_BITMAP_BYTES) return -1;
+            out->input_engaged   = src[CTRL_HDR + 0] ? 1 : 0;
+            out->input_buttons   = src[CTRL_HDR + 1];
+            out->input_modifiers = get_u32(src + CTRL_HDR + 2);
+            memcpy(out->input_held_keys, src + CTRL_HDR + 6, LS_INPUT_KEY_BITMAP_BYTES);
+            return 0;
+
+        case LS_MSG_INPUT_STATUS:
+            if (body < 2) return -1;
+            out->input_accepting = src[CTRL_HDR + 0] ? 1 : 0;
+            out->input_reason    = src[CTRL_HDR + 1];
+            return 0;
+
+        case LS_MSG_VOLUME:
+            if (body < 2) return -1;
+            out->volume = get_u16(src + CTRL_HDR + 0);
+            /* A peer that asks for more than unity is malformed, not a licence
+             * to amplify. */
+            if (out->volume > LS_VOLUME_SCALE) return -1;
+            return 0;
+
         case LS_MSG_STATS:
             if (body < 32) return -1;
             out->stats.frames_decoded   = get_u32(src + CTRL_HDR +  0);
@@ -260,6 +491,17 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
             out->stats.decode_us        = get_u32(src + CTRL_HDR + 20);
             out->stats.render_us        = get_u32(src + CTRL_HDR + 24);
             out->stats.queue_depth      = get_u32(src + CTRL_HDR + 28);
+            /* Appended later, so a client built before audio existed sends the
+             * shorter message and its audio counters stay zero rather than the
+             * whole thing being rejected. */
+            if (body >= 44) {
+                out->stats.audio_underruns   = get_u32(src + CTRL_HDR + 32);
+                out->stats.audio_overruns    = get_u32(src + CTRL_HDR + 36);
+                out->stats.audio_buffered_us = get_u32(src + CTRL_HDR + 40);
+            }
+            if (body >= 48) {
+                out->stats.decoder_flags = get_u32(src + CTRL_HDR + 44);
+            }
             return 0;
 
         case LS_MSG_PING:
@@ -267,6 +509,33 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
             if (body < 8) return -1;
             out->token = get_u64(src + CTRL_HDR);
             return 0;
+
+        case LS_MSG_CURSOR:
+            if (body < 8) return -1;
+            out->cursor_x        = get_u16(src + CTRL_HDR + 0);
+            out->cursor_y        = get_u16(src + CTRL_HDR + 2);
+            out->cursor_visible  = src[CTRL_HDR + 4];
+            out->cursor_image_id = get_u16(src + CTRL_HDR + 6);
+            return 0;
+
+        case LS_MSG_CURSOR_IMAGE: {
+            uint32_t pixels;
+            if (body < 12) return -1;
+            out->cursor_image_id = get_u16(src + CTRL_HDR + 0);
+            out->image_width     = get_u16(src + CTRL_HDR + 2);
+            out->image_height    = get_u16(src + CTRL_HDR + 4);
+            out->hotspot_x       = get_u16(src + CTRL_HDR + 6);
+            out->hotspot_y       = get_u16(src + CTRL_HDR + 8);
+            out->image_length    = (uint32_t)(body - 12);
+            out->image_offset    = (uint16_t)(CTRL_HDR + 12);
+            if (out->image_width == 0 || out->image_height == 0) return -1;
+            /* The declared size and the bytes present have to agree, or a
+             * truncated packet would be read past its end. */
+            pixels = (uint32_t)out->image_width * (uint32_t)out->image_height * 4u;
+            if (pixels != out->image_length) return -1;
+            if (out->image_length > LS_CURSOR_MAX_IMAGE_BYTES) return -1;
+            return 0;
+        }
 
         default:
             return -1;   /* unknown type -- never treat a stray packet as a command */
@@ -337,4 +606,62 @@ size_t ls_format_mac(char *dst, size_t cap, const uint8_t *mac)
     }
     dst[17] = '\0';
     return 17;
+}
+
+/* ------------------------------------------------------------------ audio */
+
+/* The sizes in the header are literals so Swift can see them. Keep them honest. */
+typedef char ls_audio_payload_size_check[
+    (LS_AUDIO_MAX_PAYLOAD == LS_AUDIO_FRAMES_PER_PACKET * LS_AUDIO_CHANNELS * 2) ? 1 : -1];
+typedef char ls_audio_packet_size_check[
+    (LS_AUDIO_MAX_PACKET == LS_AUDIO_HEADER_SIZE + LS_AUDIO_MAX_PAYLOAD) ? 1 : -1];
+
+size_t ls_audio_write_header(uint8_t *dst, size_t cap,
+                             uint16_t sequence, uint32_t timestamp,
+                             uint32_t sample_rate, uint8_t channels,
+                             uint8_t format)
+{
+    if (!dst || cap < LS_AUDIO_HEADER_SIZE) return 0;
+    if (channels == 0) return 0;
+    put_u32(dst + 0, LS_AUDIO_MAGIC);
+    put_u16(dst + 4, sequence);
+    put_u16(dst + 6, 0);                 /* reserved, must be zero */
+    put_u32(dst + 8, timestamp);
+    put_u32(dst + 12, sample_rate);
+    dst[16] = channels;
+    dst[17] = format;
+    put_u16(dst + 18, 0);                /* reserved */
+    return LS_AUDIO_HEADER_SIZE;
+}
+
+int ls_audio_parse(const uint8_t *src, size_t len, ls_audio_packet *out)
+{
+    size_t payload;
+    size_t frame_bytes;
+
+    if (!src || !out || len < LS_AUDIO_HEADER_SIZE) return -1;
+    if (get_u32(src) != LS_AUDIO_MAGIC) return -1;
+    if (len > LS_AUDIO_MAX_PACKET) return -1;
+
+    memset(out, 0, sizeof(*out));
+    out->sequence    = get_u16(src + 4);
+    out->timestamp   = get_u32(src + 8);
+    out->sample_rate = get_u32(src + 12);
+    out->channels    = src[16];
+    out->format      = src[17];
+
+    if (out->channels == 0 || out->channels > 8) return -1;
+    if (out->format != LS_AUDIO_FORMAT_S16LE) return -1;
+    if (out->sample_rate == 0 || out->sample_rate > 192000u) return -1;
+
+    payload = len - LS_AUDIO_HEADER_SIZE;
+    /* Half a frame would put the channels out of step for the rest of the
+     * stream, so a payload that is not a whole number of them is refused
+     * rather than truncated. */
+    frame_bytes = (size_t)out->channels * 2u;
+    if (payload % frame_bytes) return -1;
+
+    out->payload_offset = LS_AUDIO_HEADER_SIZE;
+    out->payload_length = (uint16_t)payload;
+    return 0;
 }

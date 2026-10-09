@@ -14,6 +14,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
 #import "LSDecoder.h"
+#import "LSDecodeQueue.h"
 #import <VideoToolbox/VideoToolbox.h>
 #import <CoreMedia/CoreMedia.h>
 #include "rtp_protocol.h"
@@ -26,6 +27,12 @@
 // exported the constant.
 #define LS_KEY_ENABLE_HW_DECODER  CFSTR("EnableHardwareAcceleratedVideoDecoder")
 #define LS_KEY_REALTIME           CFSTR("RealTime")
+// Asks the session which decoder it ended up with. Asking for hardware is a
+// request, not a guarantee: a stream the hardware cannot take -- an H.264
+// level it does not support, say -- is decoded in software instead, with no
+// error and no sign. On a 2010 iMac decoding 1080p60, that difference is the
+// difference between a cool machine and a hot one.
+#define LS_KEY_USING_HW_DECODER   CFSTR("UsingHardwareAcceleratedVideoDecoder")
 
 @interface LSAccessUnit : NSObject
 @property (nonatomic, strong) NSData *avcc;
@@ -57,7 +64,7 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
     NSData *_activeSPS;
     NSData *_activePPS;
 
-    NSMutableArray *_queue;
+    LSDecodeQueue *_queue;
     pthread_mutex_t _mutex;
     pthread_cond_t  _cond;
     NSThread *_thread;
@@ -65,12 +72,20 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
 
     double _decodeMicrosAverage;
     mach_timebase_info_data_t _timebase;
+    uint32_t _decoderFlags;
+    /// A decoder that has gone wrong goes wrong on every frame, and NSLog at
+    /// 60 Hz on this hardware is its own problem. First failure, then one line
+    /// per 300, so the record survives without becoming the bottleneck.
+    uint32_t _decodeFailures;
 }
 
 - (id)init {
     self = [super init];
     if (self) {
-        _queue = [[NSMutableArray alloc] init];
+        // Two waiting frames at most. Anything deeper is latency we would have
+        // to pay back later -- and the queue refuses, rather than corrupts,
+        // whatever does not fit.
+        _queue = [[LSDecodeQueue alloc] initWithDepth:2];
         pthread_mutex_init(&_mutex, NULL);
         pthread_cond_init(&_cond, NULL);
         mach_timebase_info(&_timebase);
@@ -121,6 +136,7 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
     }
     _activeSPS = nil;
     _activePPS = nil;
+    _decoderFlags = 0;      // no session, so nothing to say about one
 }
 
 #pragma mark - submission
@@ -129,6 +145,7 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
                      sps:(NSData *)sps
                      pps:(NSData *)pps
                timestamp:(uint32_t)timestamp
+              isKeyframe:(BOOL)isKeyframe
 {
     LSAccessUnit *unit = [[LSAccessUnit alloc] init];
     unit.avcc = avcc;
@@ -137,15 +154,19 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
     unit.timestamp = timestamp;
 
     pthread_mutex_lock(&_mutex);
-    // Depth 2. Anything deeper is latency we would have to pay back later.
-    while ([_queue count] >= 2) {
-        [_queue removeObjectAtIndex:0];
-        _framesDropped++;
-    }
-    [_queue addObject:unit];
+    [_queue push:unit isKeyframe:isKeyframe];
+    _framesDropped = [_queue dropped];
+    _queueOverflows = [_queue overflows];
     _queueDepth = (uint32_t)[_queue count];
+    BOOL needKeyframe = [_queue waitingForKeyframe];
     pthread_cond_signal(&_cond);
     pthread_mutex_unlock(&_mutex);
+
+    // On every frame refused while waiting, not just the first: the request is
+    // one UDP datagram, and if it is lost the alternative is waiting for the
+    // host's next scheduled keyframe, seconds away. The control channel limits
+    // these to ten a second.
+    if (needKeyframe && self.keyframeNeeded) self.keyframeNeeded();
 }
 
 #pragma mark - decode thread
@@ -159,8 +180,7 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
             pthread_cond_wait(&_cond, &_mutex);
         }
         if (!_running) { pthread_mutex_unlock(&_mutex); break; }
-        unit = [_queue objectAtIndex:0];
-        [_queue removeObjectAtIndex:0];
+        unit = [_queue pop];
         _queueDepth = (uint32_t)[_queue count];
         pthread_mutex_unlock(&_mutex);
 
@@ -244,8 +264,29 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
             _activeSPS = [sps copy];
             _activePPS = [pps copy];
             _statusMessage = nil;
-            NSLog(@"[LanScreen] decode session up, pixel format %@",
-                  [self nameForPixelFormat:formats[attempt]]);
+
+            // The property may not exist on every OS X release this runs on,
+            // and an unanswered question is reported as exactly that rather
+            // than guessed at either way.
+            CFBooleanRef usingHardware = NULL;
+            OSStatus asked = VTSessionCopyProperty(_session, LS_KEY_USING_HW_DECODER,
+                                                   kCFAllocatorDefault, &usingHardware);
+            if (asked == noErr && usingHardware) {
+                _decoderFlags = LS_DECODER_KNOWN
+                    | (CFBooleanGetValue(usingHardware) ? LS_DECODER_HARDWARE : 0);
+                CFRelease(usingHardware);
+            } else {
+                _decoderFlags = 0;
+            }
+
+            // The level is in the SPS, third byte after the NAL header. It is
+            // what decides whether the hardware will take the stream at all.
+            unsigned level = [sps length] > 3 ? ((const uint8_t *)[sps bytes])[3] : 0;
+            NSLog(@"[LanScreen] decode session up, pixel format %@, H.264 level %u.%u, %@",
+                  [self nameForPixelFormat:formats[attempt]], level / 10, level % 10,
+                  !(_decoderFlags & LS_DECODER_KNOWN) ? @"decoder unknown"
+                  : (_decoderFlags & LS_DECODER_HARDWARE) ? @"HARDWARE decode"
+                  : @"SOFTWARE decode -- this is the expensive one");
             return YES;
         }
         NSLog(@"[LanScreen] VTDecompressionSessionCreate failed for %@ (%d)",
@@ -313,11 +354,22 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
     if ((uint32_t)micros > _decodeMicrosecondsPeak) _decodeMicrosecondsPeak = (uint32_t)micros;
 
     if (status != noErr) {
-        NSLog(@"[LanScreen] decode failed (%d)", (int)status);
+        if (_decodeFailures++ % 300 == 0) {
+            NSLog(@"[LanScreen] decode failed (%d) (%u so far)",
+                  (int)status, _decodeFailures);
+        }
         // A decoder that has lost its reference state needs a clean restart.
         if (status == kVTInvalidSessionErr) {
             [self teardownSession];
         }
+        // Either way, what it is holding as the previous picture is suspect,
+        // and decoding the next frame on top of it is how moshing starts.
+        pthread_mutex_lock(&_mutex);
+        [_queue decodeFailed];
+        _framesDropped = [_queue dropped];
+        _queueDepth = (uint32_t)[_queue count];
+        pthread_mutex_unlock(&_mutex);
+        if (self.keyframeNeeded) self.keyframeNeeded();
     }
 }
 

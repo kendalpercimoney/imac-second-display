@@ -25,6 +25,23 @@ import Foundation
 import CoreVideo
 import CoreMedia
 import LSProtocol
+import VideoToolbox
+
+/// BGRA to biplanar 4:2:0 video range, as ScreenCaptureKit would hand it over.
+func convertTo420v(_ source: CVPixelBuffer) -> CVPixelBuffer {
+    var transfer: VTPixelTransferSession?
+    VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault, pixelTransferSessionOut: &transfer)
+    guard let transfer else { return source }
+    var destination: CVPixelBuffer?
+    CVPixelBufferCreate(kCFAllocatorDefault,
+                        CVPixelBufferGetWidth(source), CVPixelBufferGetHeight(source),
+                        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                        [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary,
+                        &destination)
+    guard let destination else { return source }
+    VTPixelTransferSessionTransferImage(transfer, from: source, to: destination)
+    return destination
+}
 
 let arguments = CommandLine.arguments
 let host = arguments.count > 1 ? arguments[1] : "127.0.0.1"
@@ -34,6 +51,18 @@ let fps = Int(arguments.count > 4 ? arguments[4] : "30") ?? 30
 // "motion" exercises the encoder with real detail; "bars" is a flat quadrant
 // pattern whose colours can be checked numerically after the round trip.
 let pattern = arguments.count > 5 ? arguments[5] : "motion"
+// What the encoder is configured with. "shipping" is what the host actually
+// does: 4:2:0 capture, no low-latency rate controller. The colour path differs
+// from BGRA, so the render and cursor tests have to run through a 4:2:0 mode
+// to mean anything.
+//
+// "greedy" is what the host used to do -- 4:2:0 into the low-latency rate
+// controller -- kept so the 5.4 ms that change was worth can be re-measured.
+// "lowlatency" and "plain" isolate the two halves, which is how it was found:
+// bundled, they could not say which half was responsible.
+let mode = arguments.count > 6 ? arguments[6] : "shipping"
+let useLowLatency = mode == "greedy" || mode == "lowlatency"
+let use420v = mode == "greedy" || mode == "shipping" || mode == "420v"
 
 let width = 1280, height = 720
 
@@ -93,7 +122,11 @@ func makeFrame(_ index: Int) -> CVPixelBuffer {
 }
 
 let sender = try UDPSender(host: host, port: port)
-let packetizer = RTPPacketizer(sender: sender, mtuPayload: Int(LS_DEFAULT_MTU_PAYLOAD))
+// Packet size from the environment, so the cost of cutting frames into six
+// times as many packets can be measured rather than assumed.
+let mtuPayload = ProcessInfo.processInfo.environment["LS_MTU_PAYLOAD"]
+    .flatMap(Int.init) ?? Int(LS_DEFAULT_MTU_PAYLOAD)
+let packetizer = RTPPacketizer(sender: sender, mtuPayload: mtuPayload)
 
 var emitted = 0
 let done = DispatchSemaphore(value: 0)
@@ -102,7 +135,8 @@ let encoder = VideoEncoder(config: .init(width: width, height: height,
                                          frameRate: fps,
                                          bitrate: 12_000_000,
                                          profileIsBaseline: true,
-                                         keyframeInterval: 1.0)) { sampleBuffer in
+                                         keyframeInterval: 1.0,
+                                         lowLatencyRateControl: useLowLatency)) { sampleBuffer in
     packetizer.packetize(sampleBuffer: sampleBuffer)
     emitted += 1
     if emitted >= frameCount { done.signal() }
@@ -113,9 +147,40 @@ if !encoder.warnings.isEmpty {
     FileHandle.standardError.write("encoder hints declined: \(encoder.warnings)\n".data(using: .utf8)!)
 }
 
+// Keyframes on request, on the port above the video one, the way the real host
+// answers the client's control channel. Without it this harness could not
+// model how the client recovers once decoding falls behind: it stops decoding
+// until a keyframe -- carrying on is what moshes the picture -- and asks for
+// one, and a sender that never answers leaves it waiting for the next
+// scheduled keyframe, which in a short run never comes.
+let keyframeLock = NSLock()
+var keyframeAsked = false
+let keyframeSocket = try? UDPBoundSocket(port: port &+ 1, recvBufferBytes: 64 * 1024)
+if let keyframeSocket {
+    Thread.detachNewThread {
+        var buffer = [UInt8](repeating: 0, count: 64)
+        var from = sockaddr_in()
+        while true {
+            let n = buffer.withUnsafeMutableBytes {
+                keyframeSocket.receive(into: $0.baseAddress!, capacity: $0.count, from: &from)
+            }
+            if n < 0 { break }
+            keyframeLock.lock(); keyframeAsked = true; keyframeLock.unlock()
+        }
+    }
+}
+func takeKeyframeRequest() -> Bool {
+    keyframeLock.lock(); defer { keyframeLock.unlock() }
+    let asked = keyframeAsked
+    keyframeAsked = false
+    return asked
+}
+var keyframesOnRequest = 0
+
 // Generate up front: the pixel-filling loop below is plain Swift and slow, and
 // it has no business sitting inside the timed path.
-let frames = (0..<min(frameCount, 60)).map { makeFrame($0) }
+var frames = (0..<min(frameCount, 60)).map { makeFrame($0) }
+if use420v { frames = frames.map(convertTo420v) }
 
 for index in 0..<frameCount {
     let pixelBuffer = frames[index % frames.count]
@@ -123,11 +188,15 @@ for index in 0..<frameCount {
     // ends of this test share that clock, so the receiver can measure true
     // end-to-end pipeline latency.
     let pts = CMClockGetTime(CMClockGetHostTimeClock())
-    encoder.encode(pixelBuffer: pixelBuffer, presentationTime: pts, forceKeyframe: index == 0)
+    let asked = takeKeyframeRequest()
+    if asked && index > 0 { keyframesOnRequest += 1 }
+    encoder.encode(pixelBuffer: pixelBuffer, presentationTime: pts,
+                   forceKeyframe: index == 0 || asked)
     usleep(UInt32(1_000_000 / fps))
 }
 
 _ = done.wait(timeout: .now() + 10)
 encoder.stop()
 
-print("sent \(emitted) frames, \(packetizer.packetsSent) packets, \(packetizer.bytesSent) bytes")
+print("sent \(emitted) frames, \(packetizer.packetsSent) packets, \(packetizer.bytesSent) bytes, "
+      + "\(keyframesOnRequest) keyframes on request")

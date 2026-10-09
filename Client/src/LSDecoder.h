@@ -44,14 +44,27 @@
 - (void)submitAccessUnit:(NSData *)avcc
                      sps:(NSData *)sps
                      pps:(NSData *)pps
-               timestamp:(uint32_t)timestamp;
+               timestamp:(uint32_t)timestamp
+              isKeyframe:(BOOL)isKeyframe;
 
 @property (nonatomic, readonly) uint32_t framesDecoded;
+/// Frames never decoded, because decoding fell behind or because they followed
+/// one that was not. Refused rather than decoded wrongly.
 @property (nonatomic, readonly) uint32_t framesDropped;
+/// How many times decoding fell behind far enough to overflow the queue.
+@property (nonatomic, readonly) uint32_t queueOverflows;
+
+/// Called when the picture cannot continue without a keyframe -- after a gap,
+/// or a frame the decoder rejected -- and again for every frame refused until
+/// one arrives. Fires on whichever thread submitted the frame.
+@property (nonatomic, copy) void (^keyframeNeeded)(void);
 @property (nonatomic, readonly) uint32_t decodeMicroseconds;       // rolling average
 @property (nonatomic, readonly) uint32_t decodeMicrosecondsLast;
 @property (nonatomic, readonly) uint32_t decodeMicrosecondsPeak;
 @property (nonatomic, readonly) uint32_t queueDepth;
+/// LS_DECODER_* flags: whether the session said which decoder it is using,
+/// and if so whether that is the hardware one. Zero until a session exists.
+@property (nonatomic, readonly) uint32_t decoderFlags;
 /// YES once a session exists and at least one frame came out of it.
 @property (nonatomic, readonly) BOOL hasDecodedFrame;
 /// Human-readable reason the decoder is unhappy, or nil.

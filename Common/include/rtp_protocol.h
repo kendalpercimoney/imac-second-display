@@ -40,6 +40,7 @@ extern "C" {
 
 #define LS_DEFAULT_VIDEO_PORT     5000   /* host -> client, RTP/H.264       */
 #define LS_DEFAULT_CONTROL_PORT   5001   /* bidirectional control messages  */
+#define LS_DEFAULT_AUDIO_PORT     5002   /* host -> client, raw PCM         */
 
 /* -------------------------------------------------------------------- RTP */
 
@@ -54,6 +55,61 @@ extern "C" {
 #define LS_DEFAULT_MTU_PAYLOAD    1400
 /* For a direct link with jumbo frames enabled on both NICs (MTU 9000). */
 #define LS_JUMBO_MTU_PAYLOAD      8900
+
+/* ------------------------------------------------------------------ audio */
+
+/*
+ * Audio is raw PCM on its own socket, deliberately.
+ *
+ * Not compressed: 48 kHz stereo 16-bit is 1.5 Mb/s, against 25 to 50 for the
+ * video, on a link that has a gigabit to spare. An AAC round trip would add
+ * more algorithmic latency than the entire rest of the pipeline costs, to save
+ * bandwidth that is not scarce.
+ *
+ * Not on the video socket: a lost audio packet must be concealed and forgotten,
+ * never treated the way a lost video packet is, and audio must not queue behind
+ * the burst of packets a keyframe makes.
+ *
+ * The header is network byte order like everything else. The samples are not:
+ * they are little-endian because both machines are, and byte-swapping ninety-six
+ * thousand samples a second on a 2010 CPU would buy nothing at all. The format
+ * field says so explicitly rather than leaving it as an exception to the rule.
+ */
+#define LS_AUDIO_MAGIC            0x4C534131u   /* "LSA1" */
+#define LS_AUDIO_HEADER_SIZE      20
+#define LS_AUDIO_SAMPLE_RATE      48000u
+#define LS_AUDIO_CHANNELS         2
+#define LS_AUDIO_FORMAT_S16LE     1
+/* 256 frames is 5.33 ms, and 1024 bytes of payload -- comfortably inside a
+ * 1400-byte packet, so audio never fragments even on a standard MTU. */
+#define LS_AUDIO_FRAMES_PER_PACKET 256
+/* Spelled out rather than computed from the three above: Swift's C importer
+ * drops a macro defined in terms of other computed macros, and silently, so the
+ * constant simply does not exist on the host side. rtp_protocol.c asserts at
+ * compile time that these still agree with the arithmetic. */
+#define LS_AUDIO_MAX_PAYLOAD      1024
+#define LS_AUDIO_MAX_PACKET       1044
+
+typedef struct {
+    uint16_t sequence;
+    uint32_t timestamp;      /* frames since the stream started               */
+    uint32_t sample_rate;
+    uint8_t  channels;
+    uint8_t  format;         /* LS_AUDIO_FORMAT_*                             */
+    uint16_t payload_offset; /* indexes into the buffer handed to the parser   */
+    uint16_t payload_length; /* bytes, so frames = length / (channels * 2)     */
+} ls_audio_packet;
+
+/* Returns bytes written, or 0 if cap is too small. */
+size_t ls_audio_write_header(uint8_t *dst, size_t cap,
+                             uint16_t sequence, uint32_t timestamp,
+                             uint32_t sample_rate, uint8_t channels,
+                             uint8_t format);
+
+/* Returns 0 on success, -1 if this is not one of ours or is malformed. A
+ * payload that is not a whole number of frames is rejected: half a frame would
+ * desynchronise the channels for the rest of the stream. */
+int ls_audio_parse(const uint8_t *src, size_t len, ls_audio_packet *out);
 
 /* ------------------------------------------------------------ H.264 NAL --*/
 
@@ -105,7 +161,13 @@ size_t ls_rtp_write_fu_a_prefix(uint8_t *dst, size_t cap,
 /* ---------------------------------------------------------------- control */
 
 #define LS_CTRL_MAGIC       0x4C534331u   /* "LSC1" */
+/* Buffer size for the small fixed messages. */
 #define LS_CTRL_MAX_SIZE    128
+/* A cursor bitmap is far bigger than the rest put together, so parsing has a
+ * higher ceiling than the small-message buffer. 64x64 RGBA is 16 KB, which one
+ * UDP datagram carries happily even if IP fragments it on the way. */
+#define LS_CURSOR_MAX_IMAGE_BYTES 16384
+#define LS_CTRL_MAX_PACKET  (LS_CURSOR_MAX_IMAGE_BYTES + 64)
 
 enum {
     LS_MSG_HELLO        = 1,  /* client -> host: I am here, this is my screen */
@@ -113,8 +175,85 @@ enum {
     LS_MSG_KEYFRAME_REQ = 3,  /* client -> host: my stream is broken, IDR now */
     LS_MSG_STATS        = 4,  /* client -> host: once a second                */
     LS_MSG_PING         = 5,  /* host -> client: opaque token                 */
-    LS_MSG_PONG         = 6   /* client -> host: same token echoed back       */
+    LS_MSG_PONG         = 6,  /* client -> host: same token echoed back       */
+    /* The pointer is sent out of band and drawn by the client, rather than
+     * being burned into the video. Video is one encode, one network trip and
+     * one decode behind; the pointer is what the eye tracks, and this way it
+     * lags by about a screen refresh instead. The cost is that the pointer runs
+     * slightly ahead of a window being dragged under it. */
+    LS_MSG_CURSOR       = 7,  /* host -> client: where the pointer is         */
+    LS_MSG_CURSOR_IMAGE = 8,  /* host -> client: what it looks like           */
+    /* Playback volume for the client, because the slider is on the host and
+     * the speakers are not. Resent periodically so a lost one heals itself. */
+    LS_MSG_VOLUME       = 9,
+    /* How long the client should hold audio before playing it. Negative pulls
+     * it earlier, which is the direction that usually matters: audio takes a
+     * shorter path than video but sits in a jitter buffer and an audio queue at
+     * the far end, so it tends to arrive late rather than early. */
+    LS_MSG_AUDIO_DELAY  = 10,
+    /* The iMac's panel brightness. The screen is over there; the slider is not. */
+    LS_MSG_BRIGHTNESS   = 11,
+    /* Input, client -> host, so the iMac's own keyboard and mouse drive the
+     * Mac it is a display for. Only honoured from the address that said HELLO:
+     * this is keystroke injection, and a UDP port on a LAN is not an identity. */
+    LS_MSG_INPUT_MOVE   = 12, /* relative pointer motion, host points          */
+    LS_MSG_INPUT_BUTTON = 13, /* a mouse button went down or up                */
+    LS_MSG_INPUT_SCROLL = 14, /* wheel or trackpad scroll                      */
+    LS_MSG_INPUT_KEY    = 15, /* a non-modifier key went down or up            */
+    LS_MSG_INPUT_FLAGS  = 16, /* a modifier key changed the modifier state     */
+    /* Everything currently held, several times a second while input is being
+     * forwarded. UDP loses the odd datagram, and a lost key-up is a key held
+     * down on the host forever; this is what lets the host notice and let go.
+     * engaged = 0 means release everything. */
+    LS_MSG_INPUT_STATE  = 17,
+    /* host -> client: whether input will be acted on, so the client does not
+     * take the iMac's mouse away from it for nothing. */
+    LS_MSG_INPUT_STATUS = 18
 };
+
+/* Volume is carried as thousandths, so 1000 is unity and 0 is silence. An
+ * integer keeps it exact across the wire and across both languages. */
+#define LS_VOLUME_SCALE     1000u
+
+/* Audio delay in milliseconds, signed. The range is what a person can usefully
+ * drag; the client clamps whatever it is actually able to do on top of that,
+ * because it cannot buffer less than nothing.
+ *
+ * An enum rather than #define so both ends get a real symbol rather than a
+ * textual substitution, which matters for the one value here that is signed. */
+enum {
+    LS_AUDIO_DELAY_MIN_MS = -50,
+    LS_AUDIO_DELAY_MAX_MS = 250
+};
+
+/* Brightness in thousandths, like volume. */
+#define LS_BRIGHTNESS_SCALE 1000u
+
+/* Flags a client sets in its HELLO. */
+/* It can draw the pointer itself, so the host may leave it out of the video.
+ * Without this the host must burn the pointer in, or there would be no pointer
+ * on screen anywhere. */
+#define LS_CLIENT_FLAG_DRAWS_CURSOR 0x0001u
+/* It can play the audio stream. Without this the host does not send any, rather
+ * than pouring 1.5 Mb/s into a socket nothing is listening to. */
+#define LS_CLIENT_FLAG_PLAYS_AUDIO  0x0002u
+/* Its display accepted a brightness reading. Without this the host greys the
+ * brightness control out and says why, rather than moving a slider that does
+ * nothing at the far end. */
+#define LS_CLIENT_FLAG_SETS_BRIGHTNESS 0x0004u
+/* This client can forward its own keyboard and mouse. */
+#define LS_CLIENT_FLAG_SENDS_INPUT  0x0008u
+
+/* INPUT_STATUS reasons. */
+#define LS_INPUT_OK              0
+#define LS_INPUT_OFF_IN_SETTINGS 1
+#define LS_INPUT_NEEDS_PERMISSION 2
+
+/* Mouse buttons, as both the index in INPUT_BUTTON and bits in a mask. */
+#define LS_BUTTON_LEFT   0
+#define LS_BUTTON_RIGHT  1
+#define LS_BUTTON_MIDDLE 2
+#define LS_INPUT_KEY_BITMAP_BYTES 16   /* virtual keycodes 0-127 */
 
 /* Client-reported counters. All cumulative since the client started, except
  * the *_us fields which are rolling averages over the last reporting period. */
@@ -127,7 +266,21 @@ typedef struct {
     uint32_t decode_us;
     uint32_t render_us;
     uint32_t queue_depth;
+    /* Audio. Appended after the fields above, so a client built before audio
+     * existed still sends a shorter STATS that parses fine. */
+    uint32_t audio_underruns;   /* gaps the client had to conceal            */
+    uint32_t audio_overruns;    /* frames dropped because the ring filled    */
+    uint32_t audio_buffered_us; /* what is waiting, which is the delay it adds */
+    /* How the client is decoding. Appended after audio for the same reason, so
+     * an older client simply reports "not known". */
+    uint32_t decoder_flags;     /* LS_DECODER_* below                        */
 } ls_stats;
+
+/* decoder_flags. KNOWN is separate from HARDWARE because "the decoder would
+ * not say" and "the decoder said software" call for different responses, and
+ * an older client that sends nothing at all must not read as the second. */
+#define LS_DECODER_KNOWN     0x0001u
+#define LS_DECODER_HARDWARE  0x0002u
 
 typedef struct {
     uint8_t  type;              /* one of LS_MSG_*                            */
@@ -145,6 +298,51 @@ typedef struct {
     uint64_t token;
     /* STATS */
     ls_stats stats;
+
+    /* CURSOR: position in streamed pixels, origin top left. */
+    uint16_t cursor_x;
+    uint16_t cursor_y;
+    uint8_t  cursor_visible;
+    uint16_t cursor_image_id;   /* which bitmap this refers to */
+
+    /* CURSOR_IMAGE: premultiplied RGBA, one row after another.
+     * image_offset indexes into the buffer handed to ls_ctrl_parse; nothing is
+     * copied, so it is only valid while that buffer is. */
+    uint16_t image_width;
+    uint16_t image_height;
+    uint16_t hotspot_x;
+    uint16_t hotspot_y;
+    uint16_t image_offset;
+    uint32_t image_length;
+
+    /* VOLUME: thousandths, 0 to LS_VOLUME_SCALE. */
+    uint16_t volume;
+    /* AUDIO_DELAY: milliseconds, signed. */
+    int16_t  audio_delay_ms;
+    /* BRIGHTNESS: thousandths, 0 to LS_BRIGHTNESS_SCALE. */
+    uint16_t brightness;
+
+    /* INPUT_MOVE: host points. INPUT_SCROLL: tenths of a line or a pixel. */
+    int16_t  input_dx;
+    int16_t  input_dy;
+    /* INPUT_BUTTON */
+    uint8_t  input_button;
+    uint8_t  input_down;
+    uint8_t  input_click_count;
+    /* INPUT_SCROLL: 1 for pixel-precise (trackpad), 0 for wheel lines. */
+    uint8_t  input_precise;
+    /* INPUT_KEY / INPUT_FLAGS: macOS virtual keycode, and the modifier flags
+     * (NSEvent / CGEventFlags device-independent bits) in force after it. */
+    uint16_t input_keycode;
+    uint8_t  input_repeat;
+    uint32_t input_modifiers;
+    /* INPUT_STATE */
+    uint8_t  input_engaged;
+    uint8_t  input_buttons;     /* bit per LS_BUTTON_*                        */
+    uint8_t  input_held_keys[LS_INPUT_KEY_BITMAP_BYTES];
+    /* INPUT_STATUS */
+    uint8_t  input_accepting;
+    uint8_t  input_reason;
 } ls_ctrl_message;
 
 /* Each builder returns the number of bytes written, or 0 if cap was too small.
@@ -159,6 +357,43 @@ size_t ls_ctrl_build_keyframe_req(uint8_t *dst, size_t cap);
 size_t ls_ctrl_build_stats(uint8_t *dst, size_t cap, const ls_stats *stats);
 size_t ls_ctrl_build_ping(uint8_t *dst, size_t cap, uint64_t token);
 size_t ls_ctrl_build_pong(uint8_t *dst, size_t cap, uint64_t token);
+
+/* Small and sent often -- hundreds of times a second is the point. */
+size_t ls_ctrl_build_cursor(uint8_t *dst, size_t cap,
+                            uint16_t x, uint16_t y,
+                            uint8_t visible, uint16_t image_id);
+
+/* Clamped to LS_VOLUME_SCALE, so a caller cannot ask for amplification. */
+size_t ls_ctrl_build_volume(uint8_t *dst, size_t cap, uint16_t volume);
+
+/* Clamped to the range above. */
+size_t ls_ctrl_build_audio_delay(uint8_t *dst, size_t cap, int16_t delay_ms);
+
+/* Clamped to LS_BRIGHTNESS_SCALE. */
+size_t ls_ctrl_build_brightness(uint8_t *dst, size_t cap, uint16_t brightness);
+
+size_t ls_ctrl_build_input_move(uint8_t *dst, size_t cap, int16_t dx, int16_t dy);
+size_t ls_ctrl_build_input_button(uint8_t *dst, size_t cap,
+                                  uint8_t button, uint8_t down, uint8_t click_count);
+size_t ls_ctrl_build_input_scroll(uint8_t *dst, size_t cap,
+                                  int16_t dx_tenths, int16_t dy_tenths, uint8_t precise);
+size_t ls_ctrl_build_input_key(uint8_t *dst, size_t cap, uint16_t keycode,
+                               uint8_t down, uint8_t repeat, uint32_t modifiers);
+size_t ls_ctrl_build_input_flags(uint8_t *dst, size_t cap,
+                                 uint16_t keycode, uint32_t modifiers);
+size_t ls_ctrl_build_input_state(uint8_t *dst, size_t cap, uint8_t engaged,
+                                 uint8_t buttons, uint32_t modifiers,
+                                 const uint8_t held_keys[LS_INPUT_KEY_BITMAP_BYTES]);
+size_t ls_ctrl_build_input_status(uint8_t *dst, size_t cap,
+                                  uint8_t accepting, uint8_t reason);
+
+/* `cap` must be at least LS_CTRL_MAX_PACKET. Returns 0 if the bitmap is larger
+ * than LS_CURSOR_MAX_IMAGE_BYTES. */
+size_t ls_ctrl_build_cursor_image(uint8_t *dst, size_t cap,
+                                  uint16_t image_id,
+                                  uint16_t width, uint16_t height,
+                                  uint16_t hotspot_x, uint16_t hotspot_y,
+                                  const uint8_t *rgba, uint32_t rgba_length);
 
 /* Returns 0 on success, -1 if the datagram is not one of ours. Unknown message
  * types are rejected so a stray packet can never be mistaken for a command. */

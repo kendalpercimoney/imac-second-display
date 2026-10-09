@@ -57,6 +57,7 @@ xcrun clang -fobjc-arc -O1 -Wall -Wno-unused-parameter -Wno-deprecated-declarati
     "$ROOT/Client/src/LSReceiver.m" \
     "$ROOT/Client/src/LSDepacketizer.m" \
     "$ROOT/Client/src/LSDecoder.m" \
+    "$ROOT/Client/src/LSDecodeQueue.m" \
     "$ROOT/Tests/loopreceive.m" \
     -o "$OUT/lsloopreceive"
 
@@ -64,8 +65,10 @@ echo "==> building depacketizer unit tests"
 xcrun clang -fobjc-arc -O1 -Wall -Wno-unused-parameter \
     -I "$ROOT/Common/include" -I "$ROOT/Client/src" \
     -framework Foundation \
+    -framework AudioToolbox \
     "$ROOT/Common/rtp_protocol.c" \
     "$ROOT/Client/src/LSDepacketizer.m" \
+    "$ROOT/Client/src/LSAudioPlayer.m" \
     "$ROOT/Tests/depacketizer_test.m" \
     -o "$OUT/lsdepacketizertest"
 
@@ -116,6 +119,6 @@ MIN_FRAMES=$(( FRAMES - 12 ))
 "$OUT/lsloopreceive" "$PORT" "$MIN_FRAMES" 25 &
 RECEIVER=$!
 sleep 1
-"$OUT/lsloopsend" 127.0.0.1 "$PORT" "$FRAMES" "$FPS"
+"$OUT/lsloopsend" 127.0.0.1 "$PORT" "$FRAMES" "$FPS" motion "${PIPELINE:-shipping}"
 
 wait $RECEIVER

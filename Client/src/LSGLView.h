@@ -38,11 +38,40 @@
 /// Clears to black and forgets the last frame.
 - (void)clear;
 
+/// Where to draw the pointer, in streamed video pixels with a top-left origin.
+/// Safe to call from any thread; redraws immediately so the pointer keeps
+/// moving even while the picture underneath is perfectly still.
+- (void)setCursorX:(int)x y:(int)y visible:(BOOL)visible;
+
+/// Premultiplied RGBA, uploaded on the next draw. Safe to call from any thread.
+- (void)setCursorImage:(NSData *)rgba
+                 width:(int)width height:(int)height
+              hotspotX:(int)hotspotX hotspotY:(int)hotspotY;
+
+/// Never draw more often than this. The pointer arrives at 120 Hz and marks
+/// the view dirty each time; on a 60 Hz panel half of those draws are of a
+/// frame nobody sees. Zero removes the limit.
+- (void)setMaximumDrawsPerSecond:(double)rate;
+
 /// 0 = present as soon as the frame is ready (tearing, lowest latency).
 /// 1 = wait for vertical blank (clean, adds up to one refresh of latency).
 @property (nonatomic, assign) BOOL vsyncEnabled;
 
 @property (nonatomic, readonly) uint32_t renderMicroseconds;   // rolling average
+/// Completed draws. Only ever read to notice that it has stopped moving.
+@property (nonatomic, readonly) uint32_t framesDrawn;
+/// Host points per point of this view, from the last frame drawn: how much a
+/// movement of the iMac's own mouse is scaled by on its way to the host.
+@property (nonatomic, readonly) double hostPointsPerViewPoint;
+
+/// The longest a single pointer update has taken to hand over.
+///
+/// This is the invariant that matters for how the pointer feels: a thread
+/// receiving network data must never wait on the display. If this creeps up to
+/// milliseconds, something in the update path is blocking on a draw -- which on
+/// a 60 Hz screen means only half the updates can be serviced and the rest
+/// queue, one refresh apart, for as long as the pointer keeps moving.
+@property (nonatomic, readonly) uint32_t cursorUpdateMaxMicroseconds;
 
 /// Reads the framebuffer back and writes a PNG. Used by the test harness to
 /// prove the render path works without anyone having to look at a screen.

@@ -24,6 +24,7 @@
 //
 #import <Foundation/Foundation.h>
 #import "LSDepacketizer.h"
+#import "LSAudioPlayer.h"
 
 static int gFailures = 0;
 
@@ -325,6 +326,59 @@ static void testSequenceWraparound(void) {
     CHECK(harness.keyframeRequests == 0, "wraparound triggered a keyframe request");
 }
 
+static void testCursorMessages(void) {
+    printf("cursor position and bitmap messages\n");
+    uint8_t small[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+
+    size_t n = ls_ctrl_build_cursor(small, sizeof(small), 1234, 567, 1, 42);
+    CHECK(n > 0 && ls_ctrl_parse(small, n, &message) == 0, "cursor position did not parse");
+    CHECK(message.type == LS_MSG_CURSOR && message.cursor_x == 1234 &&
+          message.cursor_y == 567 && message.cursor_visible == 1 &&
+          message.cursor_image_id == 42, "cursor position fields did not survive");
+
+    n = ls_ctrl_build_cursor(small, sizeof(small), 0, 0, 0, 0);
+    CHECK(n > 0 && ls_ctrl_parse(small, n, &message) == 0, "hidden cursor did not parse");
+    CHECK(message.cursor_visible == 0, "a hidden cursor came back visible");
+
+    // A bitmap, which is far larger than the small-message buffer.
+    const uint16_t w = 24, h = 24;
+    const uint32_t bytes = (uint32_t)w * h * 4;
+    uint8_t *rgba = malloc(bytes);
+    for (uint32_t i = 0; i < bytes; i++) rgba[i] = (uint8_t)(i * 7);
+
+    uint8_t *packet = malloc(LS_CTRL_MAX_PACKET);
+    n = ls_ctrl_build_cursor_image(packet, LS_CTRL_MAX_PACKET, 42, w, h, 5, 6, rgba, bytes);
+    CHECK(n > 0, "cursor bitmap would not build");
+    CHECK(ls_ctrl_parse(packet, n, &message) == 0, "cursor bitmap did not parse");
+    CHECK(message.image_width == w && message.image_height == h &&
+          message.hotspot_x == 5 && message.hotspot_y == 6 &&
+          message.cursor_image_id == 42, "bitmap header fields did not survive");
+    CHECK(message.image_length == bytes, "bitmap length wrong: %u vs %u",
+          message.image_length, bytes);
+    CHECK(memcmp(packet + message.image_offset, rgba, bytes) == 0,
+          "bitmap pixels did not survive the round trip");
+
+    // Refusals. A bitmap whose declared size disagrees with the bytes present
+    // would otherwise be read past its end.
+    CHECK(ls_ctrl_build_cursor_image(packet, LS_CTRL_MAX_PACKET, 1, w, h, 0, 0, rgba, bytes - 4) == 0,
+          "a bitmap with a mismatched length was accepted");
+    CHECK(ls_ctrl_build_cursor_image(packet, LS_CTRL_MAX_PACKET, 1, 0, h, 0, 0, rgba, bytes) == 0,
+          "a zero-width bitmap was accepted");
+    CHECK(ls_ctrl_build_cursor_image(packet, LS_CTRL_MAX_PACKET, 1, 200, 200, 0, 0, rgba, 160000) == 0,
+          "an oversized bitmap was accepted");
+    CHECK(ls_ctrl_build_cursor_image(packet, 40, 1, w, h, 0, 0, rgba, bytes) == 0,
+          "a bitmap was written into a buffer too small for it");
+
+    // Truncated on the wire: header says 24x24 but the bytes are not there.
+    n = ls_ctrl_build_cursor_image(packet, LS_CTRL_MAX_PACKET, 42, w, h, 5, 6, rgba, bytes);
+    CHECK(ls_ctrl_parse(packet, n - 100, &message) != 0,
+          "a truncated bitmap packet was accepted");
+
+    free(rgba);
+    free(packet);
+}
+
 static void testWakeOnLAN(void) {
     printf("Wake-on-LAN magic packet and MAC parsing\n");
 
@@ -415,6 +469,448 @@ static void testControlMessages(void) {
     CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "unknown message type was accepted");
 }
 
+static void testVolumeMessages(void) {
+    printf("volume messages\n");
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+
+    size_t n = ls_ctrl_build_volume(buffer, sizeof(buffer), 640);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "volume did not parse");
+    CHECK(message.type == LS_MSG_VOLUME && message.volume == 640, "volume round trip wrong");
+
+    // The extremes have to survive: silence is a legitimate setting.
+    n = ls_ctrl_build_volume(buffer, sizeof(buffer), 0);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 && message.volume == 0,
+          "silence did not round trip");
+    n = ls_ctrl_build_volume(buffer, sizeof(buffer), LS_VOLUME_SCALE);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 &&
+          message.volume == LS_VOLUME_SCALE, "unity did not round trip");
+
+    // Asking for more than unity is clamped when building...
+    n = ls_ctrl_build_volume(buffer, sizeof(buffer), 60000);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 &&
+          message.volume == LS_VOLUME_SCALE, "over-unity was not clamped");
+
+    // ...and rejected when it arrives from somewhere else, so a corrupt packet
+    // cannot turn into an amplifier.
+    n = ls_ctrl_build_volume(buffer, sizeof(buffer), 500);
+    buffer[8] = 0xFF;   /* rewrite the volume field past unity */
+    buffer[9] = 0xFF;
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "an over-unity packet was accepted");
+}
+
+static void testAudioPackets(void) {
+    printf("audio packets\n");
+    uint8_t packet[LS_AUDIO_MAX_PACKET];
+    ls_audio_packet parsed;
+
+    const int frames = LS_AUDIO_FRAMES_PER_PACKET;
+    size_t header = ls_audio_write_header(packet, sizeof(packet), 7, 4096,
+                                          LS_AUDIO_SAMPLE_RATE, LS_AUDIO_CHANNELS,
+                                          LS_AUDIO_FORMAT_S16LE);
+    CHECK(header == LS_AUDIO_HEADER_SIZE, "audio header size wrong");
+
+    // A recognisable ramp, so a byte-order mistake cannot pass unnoticed.
+    int16_t *samples = (int16_t *)(packet + header);
+    for (int i = 0; i < frames * LS_AUDIO_CHANNELS; i++) samples[i] = (int16_t)(i - 300);
+    size_t total = header + (size_t)frames * LS_AUDIO_CHANNELS * 2;
+
+    CHECK(ls_audio_parse(packet, total, &parsed) == 0, "audio packet did not parse");
+    CHECK(parsed.sequence == 7 && parsed.timestamp == 4096, "audio header round trip wrong");
+    CHECK(parsed.sample_rate == LS_AUDIO_SAMPLE_RATE && parsed.channels == LS_AUDIO_CHANNELS,
+          "audio format round trip wrong");
+    CHECK(parsed.payload_length == frames * LS_AUDIO_CHANNELS * 2, "audio payload length wrong");
+
+    const int16_t *back = (const int16_t *)(packet + parsed.payload_offset);
+    int intact = 1;
+    for (int i = 0; i < frames * LS_AUDIO_CHANNELS; i++) {
+        if (back[i] != (int16_t)(i - 300)) { intact = 0; break; }
+    }
+    CHECK(intact, "audio samples did not survive the round trip");
+
+    // Anything that is not ours, or is malformed, must be refused rather than
+    // played: a wrong frame boundary desynchronises the channels permanently.
+    CHECK(ls_audio_parse(packet, LS_AUDIO_HEADER_SIZE - 1, &parsed) != 0,
+          "a truncated audio header was accepted");
+    CHECK(ls_audio_parse(packet, header + 3, &parsed) != 0,
+          "a partial frame was accepted");
+
+    uint8_t stray[LS_AUDIO_MAX_PACKET];
+    memcpy(stray, packet, total);
+    stray[0] ^= 0xFF;
+    CHECK(ls_audio_parse(stray, total, &parsed) != 0, "a foreign packet was accepted");
+
+    memcpy(stray, packet, total);
+    stray[17] = 99;                       /* unknown sample format */
+    CHECK(ls_audio_parse(stray, total, &parsed) != 0, "an unknown sample format was accepted");
+
+    memcpy(stray, packet, total);
+    stray[16] = 0;                        /* zero channels */
+    CHECK(ls_audio_parse(stray, total, &parsed) != 0, "zero channels was accepted");
+
+    // An empty packet is well formed: it means "no samples", not a broken one.
+    CHECK(ls_audio_parse(packet, header, &parsed) == 0 && parsed.payload_length == 0,
+          "an empty audio packet should be valid");
+}
+
+static void testAudioRing(void) {
+    printf("audio ring buffer and delay line\n");
+    // 48 kHz stereo, so one millisecond is 96 samples and 48 frames.
+    // Counts are checked in frames played rather than by looking for non-zero
+    // samples: the gap concealment fades across the edges of a drain, so the
+    // exact sample values there are deliberately not the input any more.
+    LSAudioPlayer *player = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [player setTargetBufferMilliseconds:0];
+
+    int16_t out[8192];
+    memset(out, 0xAB, sizeof(out));
+    [player drainInto:out samples:256];
+    int silent = 1;
+    for (int i = 0; i < 256; i++) if (out[i] != 0) { silent = 0; break; }
+    CHECK(silent, "an empty ring did not produce silence");
+    CHECK([player framesPlayed] == 0, "an empty ring claimed to have played frames");
+
+    int16_t ramp[8192];
+    for (int i = 0; i < 8192; i++) ramp[i] = (int16_t)(i + 1);
+
+    // With no delay asked for, audio is playable the moment it lands. The first
+    // drain after silence is faded in, so the exact-order check uses the second.
+    [player enqueueSamples:ramp frames:2048];
+    [player drainInto:out samples:256];
+    [player drainInto:out samples:256];
+    int ordered = 1;
+    for (int i = 0; i < 256; i++) if (out[i] != ramp[256 + i]) { ordered = 0; break; }
+    CHECK(ordered, "with no delay the ring did not return what went in, in order");
+
+    // The delay line proper: with a 10 ms target (960 samples) exactly that
+    // much stays behind, and only what is in excess of it comes out.
+    LSAudioPlayer *delayed = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [delayed setTargetBufferMilliseconds:10];
+    CHECK([delayed targetBufferMilliseconds] > 9.9 && [delayed targetBufferMilliseconds] < 10.1,
+          "the target was not what was asked for");
+
+    [delayed enqueueSamples:ramp frames:480];      // exactly 960 samples = 10 ms
+    [delayed drainInto:out samples:256];
+    CHECK([delayed framesPlayed] == 0,
+          "the delay line played %u frames it was supposed to be holding",
+          [delayed framesPlayed]);
+
+    // One millisecond more, and exactly one millisecond becomes playable.
+    [delayed enqueueSamples:ramp + 960 frames:48];
+    uint32_t before = [delayed framesPlayed];
+    [delayed drainInto:out samples:256];
+    CHECK([delayed framesPlayed] - before == 48,
+          "the delay line released %u frames, not 48", [delayed framesPlayed] - before);
+
+    // First in, first out. Checked on a clean drain -- enough queued that the
+    // drain is satisfied in full, and not the first one after a gap -- so no
+    // fade touches the samples being compared.
+    LSAudioPlayer *fifo = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [fifo setTargetBufferMilliseconds:0];
+    [fifo enqueueSamples:ramp frames:2048];
+    [fifo drainInto:out samples:512];
+    [fifo drainInto:out samples:512];
+    CHECK(out[0] == ramp[512], "the delay line is not first in, first out (%d, wanted %d)",
+          (int)out[0], (int)ramp[512]);
+
+    // Overrun: push far more than the ring holds and the oldest audio is what
+    // goes, because what has just arrived is what the screen is showing now.
+    // Markers are kept small: these are int16 samples, and a marker that
+    // overflows wraps negative and makes a late round look like an early one.
+    LSAudioPlayer *small = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [small setTargetBufferMilliseconds:0];
+    for (int round = 0; round < 40; round++) {
+        int16_t block[2048];
+        for (int i = 0; i < 2048; i++) block[i] = (int16_t)(round * 500 + 1);
+        [small enqueueSamples:block frames:1024];
+    }
+    CHECK([small overruns] > 0, "overflowing the ring did not count an overrun");
+    [small drainInto:out samples:64];
+    CHECK(out[0] > 5000, "an overrun dropped the newest audio instead of the oldest (%d)",
+          (int)out[0]);
+
+    // Underrun: keep draining past what is there. The shortfall is faded out
+    // and then silent, so it is the tail that must be zero, not the whole of it.
+    uint32_t underrunsBefore = [player underruns];
+    [player drainInto:out samples:8192];
+    CHECK([player underruns] == underrunsBefore + 1, "running dry did not count an underrun");
+    int tailSilent = 1;
+    for (int i = 4096; i < 8192; i++) if (out[i] != 0) { tailSilent = 0; break; }
+    CHECK(tailSilent, "the shortfall was not padded with silence");
+}
+
+static void testAudioDelayAndBrightness(void) {
+    printf("audio delay and brightness messages\n");
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+
+    // Negative is the direction that matters here, so it is the first thing
+    // checked: a signed value travelling through an unsigned field is exactly
+    // the sort of thing that works for positive numbers and silently does not
+    // for negative ones.
+    size_t n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), -40);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "negative delay did not parse");
+    CHECK(message.type == LS_MSG_AUDIO_DELAY && message.audio_delay_ms == -40,
+          "negative delay did not round trip");
+
+    n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), 0);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 && message.audio_delay_ms == 0,
+          "zero delay did not round trip");
+
+    n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), 175);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 && message.audio_delay_ms == 175,
+          "positive delay did not round trip");
+
+    // Both ends of the range clamp when built.
+    n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), -3000);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 &&
+          message.audio_delay_ms == LS_AUDIO_DELAY_MIN_MS, "delay did not clamp low");
+    n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), 3000);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 &&
+          message.audio_delay_ms == LS_AUDIO_DELAY_MAX_MS, "delay did not clamp high");
+
+    // And an out-of-range value arriving from elsewhere is refused rather than
+    // clamped: nothing we build can produce it, so it is a corrupt packet.
+    n = ls_ctrl_build_audio_delay(buffer, sizeof(buffer), 100);
+    buffer[8] = 0x7F; buffer[9] = 0xFF;      /* 32767 ms */
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "an absurd delay was accepted");
+
+    printf("brightness\n");
+    n = ls_ctrl_build_brightness(buffer, sizeof(buffer), 250);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "brightness did not parse");
+    CHECK(message.type == LS_MSG_BRIGHTNESS && message.brightness == 250,
+          "brightness did not round trip");
+    n = ls_ctrl_build_brightness(buffer, sizeof(buffer), 0);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 && message.brightness == 0,
+          "a dark screen did not round trip");
+    n = ls_ctrl_build_brightness(buffer, sizeof(buffer), 9000);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0 &&
+          message.brightness == LS_BRIGHTNESS_SCALE, "brightness did not clamp");
+    n = ls_ctrl_build_brightness(buffer, sizeof(buffer), 500);
+    buffer[8] = 0xFF; buffer[9] = 0xFF;
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "an over-range brightness was accepted");
+}
+
+/// The largest jump between consecutive samples of the same channel. A click is
+/// a discontinuity, so this is the thing to measure: a signal that steps
+/// straight to zero has a jump the size of the signal, and one that is faded
+/// out has jumps the size of a fade step.
+static int maxStep(const int16_t *samples, int count, int channels) {
+    int worst = 0;
+    for (int i = channels; i < count; i++) {
+        int delta = (int)samples[i] - (int)samples[i - channels];
+        if (delta < 0) delta = -delta;
+        if (delta > worst) worst = delta;
+    }
+    return worst;
+}
+
+static void testAudioConcealment(void) {
+    printf("underrun concealment and clock drift\n");
+    LSAudioPlayer *player = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [player setTargetBufferMilliseconds:0];
+
+    // A loud, constant signal. Running out of it and stepping to zero would be
+    // a 20000-unit discontinuity, which is a click you would certainly hear.
+    int16_t loud[4096];
+    for (int i = 0; i < 4096; i++) loud[i] = 20000;
+
+    int16_t out[4096];
+    [player enqueueSamples:loud frames:100];          // 200 samples
+    memset(out, 0, sizeof(out));
+    [player drainInto:out samples:2048];              // far more than is there
+    CHECK([player underruns] == 1, "the underrun was not counted");
+
+    int step = maxStep(out, 2048, 2);
+    // A one millisecond fade from 20000 is about 417 per step. Allow generous
+    // headroom; what matters is that it is nothing like a 20000 cliff.
+    CHECK(step < 2000, "leaving a gap stepped by %d, which is a click", step);
+
+    // And coming back from the gap must ramp up, not step up.
+    [player enqueueSamples:loud frames:200];
+    memset(out, 0, sizeof(out));
+    [player drainInto:out samples:400];
+    CHECK(out[0] < 2000, "returning from a gap started at %d, which is a click",
+          (int)out[0]);
+    step = maxStep(out, 400, 2);
+    CHECK(step < 2000, "returning from a gap stepped by %d", step);
+
+    // Clock drift: the host's 48 kHz and this machine's are never the same, so
+    // the buffer creeps. It must be trimmed a frame at a time rather than
+    // allowed to pile up until the ring overflows and drops a lump.
+    LSAudioPlayer *drifting = [[LSAudioPlayer alloc] initWithSampleRate:48000 channels:2];
+    [drifting setTargetBufferMilliseconds:25];
+    // Start it 150 ms deep -- an excursion, not drift: the audio device stalling
+    // for a moment, or a burst from the host. All of that depth is latency you
+    // hear against the picture, so it has to come back, and quickly.
+    for (int i = 0; i < 28; i++) [drifting enqueueSamples:loud frames:256];
+    double startedAt = [drifting bufferedMilliseconds];
+    CHECK(startedAt > 100, "the excursion did not take (%.1f ms)", startedAt);
+
+    // Then a balanced stream: as much in as out, so anything that comes back is
+    // the correction doing it and not the drain outpacing the source.
+    int packets = 0;
+    while (packets < 4000 && [drifting bufferedMilliseconds] > 25 + 40 + 5) {
+        [drifting enqueueSamples:loud frames:256];
+        [drifting drainInto:out samples:512];        // 256 frames
+        packets++;
+    }
+    CHECK([drifting driftTrims] > 0, "a buffer past its slack was not trimmed");
+    CHECK([drifting overruns] == 0,
+          "the excursion was left to pile up until the ring overflowed (%u frames)",
+          [drifting overruns]);
+    CHECK([drifting bufferedMilliseconds] <= 25 + 40 + 5,
+          "the buffer never came back down (%.1f ms after %d packets)",
+          [drifting bufferedMilliseconds], packets);
+    // 256 frames is 5.33 ms, so this is how long it took in real time.
+    CHECK(packets < 600, "it took %d packets (%.1f s) to recover, which is too long",
+          packets, packets * 256.0 / 48000.0);
+}
+
+static void testStatsAudioFields(void) {
+    printf("stats carry the audio counters, old messages still parse\n");
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+    ls_stats stats;
+    memset(&stats, 0, sizeof(stats));
+    stats.frames_decoded = 1234;
+    stats.queue_depth = 3;
+    stats.audio_underruns = 17;
+    stats.audio_overruns = 5;
+    stats.audio_buffered_us = 41000;
+
+    size_t n = ls_ctrl_build_stats(buffer, sizeof(buffer), &stats);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "stats did not parse");
+    CHECK(message.stats.frames_decoded == 1234 && message.stats.queue_depth == 3,
+          "the original stats fields stopped round tripping");
+    CHECK(message.stats.audio_underruns == 17 && message.stats.audio_overruns == 5 &&
+          message.stats.audio_buffered_us == 41000, "the audio counters did not round trip");
+
+    // A client built before audio existed sends the shorter message. It must
+    // still parse, with the audio counters simply absent, rather than the whole
+    // report being thrown away. Cut to exactly the 32-byte body such a client
+    // sends -- by its real size, not by an offset from whatever the current
+    // message happens to be, which silently stopped meaning "pre-audio" the
+    // moment another field was appended.
+    size_t preAudio = (n - 48) + 32;
+    uint8_t older[LS_CTRL_MAX_SIZE];
+    memcpy(older, buffer, n);
+    older[6] = (uint8_t)(((preAudio) >> 8) & 0xFF);
+    older[7] = (uint8_t)((preAudio) & 0xFF);
+    memset(&message, 0xAB, sizeof(message));
+    CHECK(ls_ctrl_parse(older, preAudio, &message) == 0, "a pre-audio stats message was rejected");
+    CHECK(message.stats.frames_decoded == 1234, "the older message lost its counters");
+    CHECK(message.stats.audio_underruns == 0, "the older message invented audio counters");
+    CHECK(message.stats.decoder_flags == 0, "the older message invented decoder flags");
+}
+
+static void testInputMessages(void) {
+    printf("input messages round trip, signed, and refuse what is not a key\n");
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+    size_t n;
+
+    // Motion is relative and goes both ways. A sign lost in the wire format is
+    // a pointer that can only ever move right and down.
+    n = ls_ctrl_build_input_move(buffer, sizeof(buffer), -37, 1200);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.type == LS_MSG_INPUT_MOVE, "move did not parse");
+    CHECK(message.input_dx == -37 && message.input_dy == 1200,
+          "move lost its sign or its size");
+
+    n = ls_ctrl_build_input_button(buffer, sizeof(buffer), LS_BUTTON_RIGHT, 1, 2);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_button == LS_BUTTON_RIGHT && message.input_down == 1
+          && message.input_click_count == 2, "button did not round trip");
+
+    n = ls_ctrl_build_input_scroll(buffer, sizeof(buffer), 15, -250, 1);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_dx == 15 && message.input_dy == -250
+          && message.input_precise == 1, "scroll did not round trip");
+
+    n = ls_ctrl_build_input_key(buffer, sizeof(buffer), 12, 1, 1, 0x00100008u);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_keycode == 12 && message.input_down == 1
+          && message.input_repeat == 1 && message.input_modifiers == 0x00100008u,
+          "key did not round trip");
+
+    n = ls_ctrl_build_input_flags(buffer, sizeof(buffer), 56, 0x00020002u);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_keycode == 56 && message.input_modifiers == 0x00020002u,
+          "flags did not round trip");
+
+    uint8_t held[LS_INPUT_KEY_BITMAP_BYTES];
+    memset(held, 0, sizeof(held));
+    held[0] |= 1u << 0;            // keycode 0, 'a'
+    held[127 / 8] |= 1u << (127 % 8);  // the highest keycode there is
+    n = ls_ctrl_build_input_state(buffer, sizeof(buffer), 1, 0x5, 0x100u, held);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_engaged == 1 && message.input_buttons == 0x5
+          && message.input_modifiers == 0x100u
+          && memcmp(message.input_held_keys, held, sizeof(held)) == 0,
+          "state did not round trip, including both ends of the key bitmap");
+
+    n = ls_ctrl_build_input_status(buffer, sizeof(buffer), 0, LS_INPUT_NEEDS_PERMISSION);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.input_accepting == 0
+          && message.input_reason == LS_INPUT_NEEDS_PERMISSION,
+          "status did not round trip");
+
+    // Refused rather than passed on. A keycode outside 0-127 is not a key and
+    // would index past the held-key bitmap on the host.
+    n = ls_ctrl_build_input_key(buffer, sizeof(buffer), 128, 1, 0, 0);
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "keycode 128 was accepted");
+    n = ls_ctrl_build_input_flags(buffer, sizeof(buffer), 300, 0);
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "flags keycode 300 was accepted");
+    n = ls_ctrl_build_input_button(buffer, sizeof(buffer), 40, 1, 1);
+    CHECK(ls_ctrl_parse(buffer, n, &message) != 0, "button 40 was accepted");
+
+    // A truncated state must not be read past its end: it carries the
+    // held-key bitmap, and half a bitmap would release keys that are held.
+    n = ls_ctrl_build_input_state(buffer, sizeof(buffer), 1, 0, 0, held);
+    size_t cut = n - 4;
+    buffer[6] = (uint8_t)((cut >> 8) & 0xFF);
+    buffer[7] = (uint8_t)(cut & 0xFF);
+    CHECK(ls_ctrl_parse(buffer, cut, &message) != 0, "a truncated input state was accepted");
+}
+
+static void testStatsDecoderFlags(void) {
+    printf("stats say how the client is decoding, and an older client says nothing\n");
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    ls_ctrl_message message;
+    ls_stats stats;
+    memset(&stats, 0, sizeof(stats));
+    stats.frames_decoded = 99;
+    stats.audio_buffered_us = 7;
+    stats.decoder_flags = LS_DECODER_KNOWN | LS_DECODER_HARDWARE;
+
+    size_t n = ls_ctrl_build_stats(buffer, sizeof(buffer), &stats);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0, "stats did not parse");
+    CHECK(message.stats.decoder_flags == (LS_DECODER_KNOWN | LS_DECODER_HARDWARE),
+          "the decoder flags did not round trip");
+    CHECK(message.stats.audio_buffered_us == 7, "appending the flags broke the audio field");
+
+    stats.decoder_flags = LS_DECODER_KNOWN;
+    n = ls_ctrl_build_stats(buffer, sizeof(buffer), &stats);
+    CHECK(ls_ctrl_parse(buffer, n, &message) == 0
+          && message.stats.decoder_flags == LS_DECODER_KNOWN,
+          "\"known, and software\" did not round trip -- that is the one that matters");
+
+    // The client the user is running right now predates this field. Its
+    // message is the 44-byte body, and it must read as "not known", never as
+    // "software", or every existing client would be reported as overheating.
+    // Bytes 6-7 are the total length, header included -- not the body.
+    size_t preDecoder = n - 4;
+    buffer[6] = (uint8_t)((preDecoder >> 8) & 0xFF);
+    buffer[7] = (uint8_t)(preDecoder & 0xFF);
+    memset(&message, 0xAB, sizeof(message));
+    CHECK(ls_ctrl_parse(buffer, preDecoder, &message) == 0,
+          "a stats message from before the decoder flags was rejected");
+    CHECK(message.stats.audio_buffered_us == 7, "it lost its audio counters");
+    CHECK((message.stats.decoder_flags & LS_DECODER_KNOWN) == 0,
+          "an older client was reported as having said how it decodes");
+}
+
 int main(void) {
     @autoreleasepool {
         testSingleAndFragmented();
@@ -423,6 +919,15 @@ int main(void) {
         testStalledPartialFrame();
         testControlMessages();
         testWakeOnLAN();
+        testCursorMessages();
+        testVolumeMessages();
+        testAudioPackets();
+        testAudioRing();
+        testAudioDelayAndBrightness();
+        testAudioConcealment();
+        testStatsAudioFields();
+    testStatsDecoderFlags();
+    testInputMessages();
 
         if (gFailures == 0) {
             printf("\nAll depacketizer tests passed.\n");

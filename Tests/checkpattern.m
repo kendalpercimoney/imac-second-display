@@ -30,8 +30,19 @@ typedef struct { const char *name; double fx, fy; int r, g, b; } Expectation;
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc < 2) { fprintf(stderr, "usage: checkpattern <png> [tolerance]\n"); return 2; }
+        if (argc < 2) {
+            fprintf(stderr, "usage: checkpattern <png> [tolerance] [--at x y r g b]\n");
+            return 2;
+        }
         int tolerance = argc > 2 ? atoi(argv[2]) : 32;
+        int pointMode = 0, px = 0, py = 0, pr = 0, pg = 0, pb = 0;
+        for (int i = 3; i + 5 < argc; i++) {
+            if (strcmp(argv[i], "--at") == 0) {
+                pointMode = 1;
+                px = atoi(argv[i+1]); py = atoi(argv[i+2]);
+                pr = atoi(argv[i+3]); pg = atoi(argv[i+4]); pb = atoi(argv[i+5]);
+            }
+        }
 
         NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]]];
         CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
@@ -52,6 +63,17 @@ int main(int argc, const char *argv[]) {
         CGImageRelease(image);
 
         printf("image %zux%zu, tolerance +/-%d\n", width, height, tolerance);
+
+        if (pointMode) {
+            uint8_t *p = pixels + (size_t)py * stride + (size_t)px * 4;
+            int dr = abs((int)p[0] - pr), dg = abs((int)p[1] - pg), db = abs((int)p[2] - pb);
+            BOOL ok = (dr <= tolerance && dg <= tolerance && db <= tolerance);
+            printf("  point (%4d,%4d): got (%3u,%3u,%3u) want (%3d,%3d,%3d)  %s\n",
+                   px, py, p[0], p[1], p[2], pr, pg, pb, ok ? "ok" : "OUT OF RANGE");
+            free(pixels);
+            printf("\n%s\n", ok ? "RESULT: PASS" : "RESULT: FAIL");
+            return ok ? 0 : 1;
+        }
 
         Expectation expectations[] = {
             { "top-left  red  ", 0.25, 0.25, 255,   0,   0 },

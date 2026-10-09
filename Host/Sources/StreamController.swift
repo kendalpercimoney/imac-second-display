@@ -37,6 +37,10 @@ final class StreamController: ObservableObject {
     @Published private(set) var warnings: [String] = []
 
     @Published private(set) var outgoingMbps: Double = 0
+    /// Packets this Mac could not hand to the network at all. Distinct from
+    /// the client's `packets_lost`, which counts packets that were sent and
+    /// did not arrive; these never left.
+    @Published private(set) var packetsNotSent: UInt64 = 0
     @Published private(set) var encodedFPS: Double = 0
     @Published private(set) var encodeMilliseconds: Double = 0
     /// Capture timestamp to bytes-on-the-wire. This is the whole host-side
@@ -49,9 +53,18 @@ final class StreamController: ObservableObject {
     /// sending. Both 0 until a stream has started.
     @Published private(set) var linkMTUBytes: Int = 0
     @Published private(set) var effectiveMTUPayload: Int = 0
+    /// The interface that routes to the client, for naming it in the panel's
+    /// instruction for raising the MTU.
+    @Published private(set) var linkInterfaceName: String = ""
+    /// What the running stream was actually configured with, including any
+    /// control whose value was not honoured. Nil until a stream has started.
+    @Published private(set) var plan: StreamPlan?
     @Published private(set) var activeSourceDescription: String = ""
     @Published private(set) var wakeStatus: String = ""
     @Published private(set) var fullPerformanceHeld = false
+    /// Whether this app has the Accessibility permission, without which posted
+    /// keyboard and mouse events go nowhere.
+    @Published private(set) var inputTrusted = InputInjector.isTrusted
     @Published var displays: [DisplayInfo] = []
 
     var virtualDisplaySupported: Bool { LSVirtualDisplay.isSupported() }
@@ -66,6 +79,19 @@ final class StreamController: ObservableObject {
     private var control: ControlChannel?
     /// Held for as long as we stream: releasing it removes the display.
     private var virtualDisplay: LSVirtualDisplay?
+    private var cursorTracker: CursorTracker?
+    private var audioSender: AudioSender?
+    /// Turns the iMac's keyboard and mouse into events here. Its own lock makes
+    /// it safe to call from the control thread and the encode queue alike.
+    private var injector: InputInjector?
+    /// Whether input from the client is acted on right now: switched on, and
+    /// permitted. Refreshed with the settings push every two seconds, and read
+    /// on the control thread for every input message, hence the lock.
+    private let inputLock = NSLock()
+    private var inputAccepted = false
+    /// Resent periodically, because a lost volume message would otherwise leave
+    /// the iMac at whatever it was last told until something else changed it.
+    private var volumeTimer: DispatchSourceTimer?
 
     private let encodeQueue = DispatchQueue(label: "com.lanscreen.encode", qos: .userInteractive)
 
@@ -79,8 +105,20 @@ final class StreamController: ObservableObject {
     /// on-demand keyframe always re-encodes what is actually on screen.
     private var lastCapturedBuffer: CVPixelBuffer?
     private var lastEncodeSubmitTime: TimeInterval = 0
+    /// What the outgoing interface reported when the stream started, kept so a
+    /// plan can be rebuilt mid-stream without asking the socket again.
+    private var startedWithLinkMTU: Int?
     private var forceKeyframeFlag = false
     private var sdpWritten = false
+    /// Whether the stream that stopped was stopped by this app rather than by
+    /// the user, and so is owed back.
+    private var owesResume = false
+    /// How many times in a row we have restarted a stream that then died
+    /// quickly. Retrying is right for a capture that stopped because the Mac
+    /// slept; it is wrong for one that stops immediately every time, which is
+    /// what a revoked Screen Recording grant looks like, and retrying that
+    /// forever would be worse than the freeze it is meant to fix.
+    private var shortLivedResumes = 0
     /// When the current stream started, so the log lines carry an elapsed time
     /// rather than only a wall clock.
     private var startedAt: Date?
@@ -146,12 +184,15 @@ final class StreamController: ObservableObject {
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            guard self.settings.wakeClientAutomatically else { return }
-            // The Ethernet link has to renegotiate after wake, which takes a
-            // moment; a packet sent immediately goes nowhere. Retrying for a
-            // while covers both that and an iMac that is slow to come up.
-            self.wakeClient(reason: "this Mac woke")
-            self.startWakeRetries()
+            if self.settings.wakeClientAutomatically {
+                // The Ethernet link has to renegotiate after wake, which takes
+                // a moment; a packet sent immediately goes nowhere. Retrying
+                // for a while covers both that and an iMac that is slow to
+                // come up.
+                self.wakeClient(reason: "this Mac woke")
+                self.startWakeRetries()
+            }
+            self.resumeAfterWakeIfNeeded()
         })
 
         sleepObservers.append(center.addObserver(
@@ -161,8 +202,51 @@ final class StreamController: ObservableObject {
             // Stopping sends BYE, which makes the client drop its keep-awake
             // assertion so the iMac can sleep too instead of sitting lit up all
             // night showing a frozen frame.
-            self.stop()
+            //
+            // Remembered, because a stream this app stopped by itself is one it
+            // owes the user back. Without this the iMac simply stayed dark
+            // after every lid close, which is indistinguishable from a freeze:
+            // the screen you are looking at stops updating and nothing says
+            // why.
+            self.stop(resumeWhenPossible: true)
         })
+    }
+
+    /// Put the stream back after the Mac wakes, if sleep is what took it away.
+    ///
+    /// Not immediately. The Ethernet link renegotiates, the window server
+    /// republishes displays, and `SCShareableContent` returns an empty list for
+    /// a second or two after wake -- which is the "No capturable display found"
+    /// that greeted every wake. `startStreaming` retries that lookup, and this
+    /// gives the machine a moment before the first attempt regardless.
+    private func resumeAfterWakeIfNeeded() {
+        guard owesResume else { return }
+        onMain { self.statusText = "Resuming after wake…" }
+        // The timers scheduled at stop() time did not fire while the Mac was
+        // asleep, or fired and found no displays yet. Start a fresh round now
+        // that the machine is actually up.
+        scheduleResume(after: 2.0, attemptsLeft: 12)
+    }
+
+    /// Put the stream back, once whatever took it away has finished.
+    ///
+    /// The flag is cleared when the stream is actually handed back, not when
+    /// the attempt is scheduled. `stop()` tears down inside a Task, so
+    /// `isRunning` is still true for a moment afterwards; a resume that checked
+    /// once would find the old stream still shutting down, conclude there was
+    /// nothing to resume, and leave the iMac dark with the flag already
+    /// cleared.
+    private func scheduleResume(after delay: TimeInterval, attemptsLeft: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.owesResume else { return }
+            guard !self.isRunning else {
+                guard attemptsLeft > 0 else { self.owesResume = false; return }
+                self.scheduleResume(after: 0.5, attemptsLeft: attemptsLeft - 1)
+                return
+            }
+            self.owesResume = false
+            self.start()
+        }
     }
 
     /// Sends a magic packet, if we know where to send it.
@@ -248,8 +332,10 @@ final class StreamController: ObservableObject {
                     self.startedAt = Date()
                     self.isRunning = true
                     self.statusText = "Streaming to \(self.settings.clientAddress):\(self.settings.videoPort)"
-                    StreamController.statsLog.notice(
-                        "stream started \(self.settings.width, privacy: .public)x\(self.settings.height, privacy: .public) @ \(self.settings.frameRate, privacy: .public), \(self.settings.bitrateMbps, format: .fixed(precision: 0), privacy: .public) Mb/s")
+                    if StreamController.logsProgress {
+                        StreamController.statsLog.notice(
+                            "stream started \(self.settings.width, privacy: .public)x\(self.settings.height, privacy: .public) @ \(self.settings.frameRate, privacy: .public), \(self.activeBitrateMbps, format: .fixed(precision: 0), privacy: .public) Mb/s")
+                    }
                 }
             } catch {
                 await teardown()
@@ -264,14 +350,38 @@ final class StreamController: ObservableObject {
         }
     }
 
-    func stop() {
+    /// A stop the user asked for. Anything the app stops by itself says so,
+    /// because only one of the two is owed back afterwards.
+    func stop() { stop(resumeWhenPossible: false) }
+
+    private func stop(resumeWhenPossible: Bool) {
         guard isRunning else { return }
+
+        var resuming = resumeWhenPossible
+        if resumeWhenPossible {
+            let ranFor = Date().timeIntervalSince(startedAt ?? Date())
+            shortLivedResumes = ranFor < 15 ? shortLivedResumes + 1 : 0
+            if shortLivedResumes > 3 {
+                resuming = false
+                onMain {
+                    self.lastError = "The capture keeps stopping as soon as it starts. "
+                        + "Check Screen Recording in System Settings, then press Start."
+                }
+            }
+        } else {
+            shortLivedResumes = 0
+        }
+
+        owesResume = resuming
+        if resuming { scheduleResume(after: 2.0, attemptsLeft: 12) }
         onMain { self.statusText = "Stopping…" }
         Task {
             await teardown()
             onMain {
-                StreamController.statsLog.notice(
-                    "stream stopped after \(Int(Date().timeIntervalSince(self.startedAt ?? Date())), privacy: .public)s")
+                if StreamController.logsProgress {
+                    StreamController.statsLog.notice(
+                        "stream stopped after \(Int(Date().timeIntervalSince(self.startedAt ?? Date())), privacy: .public)s")
+                }
                 self.startedAt = nil
                 self.isRunning = false
                 self.statusText = "Idle"
@@ -295,36 +405,39 @@ final class StreamController: ObservableObject {
 
         let sender = try UDPSender(host: settings.clientAddress,
                                    port: UInt16(settings.videoPort))
+
         // Jumbo frames are a setting here but a property of the cable, the
-        // adapter and both machines. A manually raised MTU does not survive a
-        // reboot, so a setting that was right yesterday can be wrong today with
-        // nothing to show for it except a stream that slowly falls apart: an
-        // oversized datagram is not rejected, it is split into IP fragments, and
-        // losing any one fragment destroys the whole packet.
+        // adapter and both machines, and a manually raised MTU does not outlive
+        // a reboot. So a setting that was right yesterday can be wrong today
+        // with nothing to show for it but a stream that slowly falls apart.
+        // Check rather than assume, and carry on with what the link can take.
         let requestedPayload = settings.mtuPayload
         let linkMTU = sender.linkMTU
-        let effectivePayload = lsEffectiveMTUPayload(requested: requestedPayload,
-                                                     linkMTU: linkMTU,
-                                                     headerSize: Int(LS_RTP_HEADER_SIZE))
+        let plan = StreamPlan(settings: settings, linkMTU: linkMTU,
+                              clientPlaysAudio: client.hasSaidHello ? client.playsAudio : nil,
+                              clientSetsBrightness: client.hasSaidHello
+                                  ? client.setsBrightness : nil,
+                              clientSendsInput: client.hasSaidHello ? client.sendsInput : nil)
+        let effectivePayload = plan.mtuPayload
         var pathWarnings: [String] = []
         if let mtu = linkMTU, effectivePayload != requestedPayload {
             pathWarnings.append(
-                "Packet size set to \(requestedPayload) B but the link to "
-                + "\(settings.clientAddress) has an MTU of \(mtu). Every packet would be "
-                + "split into \(Int(ceil(Double(requestedPayload + lsIPv4UDPOverhead) / Double(mtu)))) "
-                + "IP fragments and one lost fragment destroys the whole packet, so "
-                + "\(effectivePayload) B is being used instead. To get jumbo frames back, set "
-                + "MTU 9000 on this Mac and the client — it is not persistent across a reboot.")
+                "Packet size \(requestedPayload) B needs MTU "
+                + "\(requestedPayload + lsIPv4UDPOverhead); the link is \(mtu). "
+                + "Using \(effectivePayload) B.")
         }
+        startedWithLinkMTU = linkMTU
         onMain {
+            self.plan = plan
             self.linkMTUBytes = linkMTU ?? 0
             self.effectiveMTUPayload = effectivePayload
+            self.linkInterfaceName = sender.linkInterfaceName ?? ""
             // Published here rather than with the encoder's warnings at the end
-            // of startPipeline: if anything in between throws, this is exactly
-            // the warning you still want to have seen.
+            // of this function: if anything between the two throws, this is
+            // exactly the warning you still want to have seen.
             self.warnings = pathWarnings
         }
-        if let mtu = linkMTU {
+        if let mtu = linkMTU, StreamController.logsProgress {
             StreamController.statsLog.notice(
                 "link mtu=\(mtu, privacy: .public) requested payload=\(requestedPayload, privacy: .public) using=\(effectivePayload, privacy: .public)")
         }
@@ -358,17 +471,110 @@ final class StreamController: ObservableObject {
         control.onStateChanged = { [weak self] state in
             self?.onMain { self?.client = state }
         }
+
+        let injector = InputInjector()
+        injector.onPointerMoved = { [weak self] in self?.cursorTracker?.sampleNow() }
+        self.injector = injector
+        control.onInput = { [weak self] message in
+            guard let self else { return }
+            self.inputLock.lock()
+            let accepted = self.inputAccepted
+            self.inputLock.unlock()
+            if accepted { self.injector?.handle(message) }
+        }
         try control.start(port: UInt16(settings.controlPort))
 
-        let encoderConfig = VideoEncoder.Configuration(
-            width: settings.width,
-            height: settings.height,
-            frameRate: settings.frameRate,
-            bitrate: settings.bitrateBitsPerSecond,
-            profileIsBaseline: settings.profile == .baseline,
-            keyframeInterval: settings.keyframeSeconds)
+        let encoder = makeEncoder(for: plan)
+        try encoder.start()
+        let encoderWarnings = encoder.warnings
 
-        let encoder = VideoEncoder(config: encoderConfig) { [weak self] sampleBuffer in
+        let capture = CaptureEngine()
+        capture.onFrame = { [weak self] pixelBuffer, time in
+            self?.handleCapturedFrame(pixelBuffer, time)
+        }
+        capture.onStreamStopped = { [weak self] error in
+            guard let self else { return }
+            // ScreenCaptureKit stops when the Mac sleeps, whatever "stop when
+            // this Mac sleeps" is set to -- that setting decides whether we
+            // send BYE first, not whether the capture survives. So this, not
+            // the sleep notification, is how the stream usually ends, and it
+            // used to end here for good: the iMac kept showing the last frame
+            // it was sent, which is indistinguishable from a freeze.
+            self.onMain { self.lastError = "Capture stopped: \(error.localizedDescription)" }
+            self.stop(resumeWhenPossible: true)
+        }
+
+        encodeQueue.sync {
+            self.sender = sender
+            self.packetizer = packetizer
+            self.control = control
+            self.encoder = encoder
+            self.capture = capture
+            self.lastEncodeSubmitTime = CFAbsoluteTimeGetCurrent()
+        }
+
+        if plan.sendsAudio {
+            let audio = try AudioSender(host: settings.clientAddress,
+                                        port: UInt16(plan.audioPort))
+            audioSender = audio
+            capture.onAudio = { [weak audio] samples, frames, channels in
+                audio?.send(samples, frames: frames, channels: channels)
+            }
+        }
+
+        try await capture.start(displayID: captureDisplayID,
+                                width: plan.width,
+                                height: plan.height,
+                                frameRate: plan.frameRate,
+                                showsCursor: plan.capturesCursor,
+                                useYUV420: plan.capturesYUV420,
+                                capturesAudio: plan.sendsAudio)
+
+        startClientSettingsUpdates(control: control)
+
+        // The pointer is drawn by the client, so it must not also be in the
+        // video -- otherwise there are two of them, one lagging the other.
+        if settings.forwardCursor {
+            let tracker = CursorTracker()
+            var positionBuffer = [UInt8](repeating: 0, count: Int(LS_CTRL_MAX_SIZE))
+            var imageBuffer = [UInt8](repeating: 0, count: Int(LS_CTRL_MAX_PACKET))
+
+            tracker.onPosition = { [weak control] x, y, visible, imageID in
+                let n = ls_ctrl_build_cursor(&positionBuffer, positionBuffer.count,
+                                             x, y, visible ? 1 : 0, imageID)
+                if n > 0 { control?.send(positionBuffer, count: Int(n)) }
+            }
+            tracker.onImage = { [weak control] imageID, width, height, hotX, hotY, pixels in
+                let n = pixels.withUnsafeBytes { raw -> size_t in
+                    guard let base = raw.baseAddress else { return 0 }
+                    return ls_ctrl_build_cursor_image(
+                        &imageBuffer, imageBuffer.count, imageID,
+                        UInt16(width), UInt16(height), UInt16(hotX), UInt16(hotY),
+                        base.assumingMemoryBound(to: UInt8.self), UInt32(raw.count))
+                }
+                if n > 0 { control?.send(imageBuffer, count: Int(n)) }
+            }
+            tracker.start(displayID: captureDisplayID,
+                          streamWidth: settings.width, streamHeight: settings.height)
+            cursorTracker = tracker
+        }
+
+        onMain { self.warnings = pathWarnings + encoderWarnings }
+        startIdleHeartbeat()
+        await MainActor.run { self.startStatsTimer() }
+    }
+
+    /// One place the encoder is built, so the mode switch can rebuild it
+    /// identically to the way the stream started it.
+    private func makeEncoder(for plan: StreamPlan) -> VideoEncoder {
+        let config = VideoEncoder.Configuration(
+            width: plan.width,
+            height: plan.height,
+            frameRate: plan.frameRate,
+            bitrate: plan.bitrateBitsPerSecond,
+            profileIsBaseline: plan.profile != .main,
+            keyframeInterval: plan.keyframeSeconds)
+        return VideoEncoder(config: config) { [weak self] sampleBuffer in
             // VideoToolbox serializes output callbacks per session, so the
             // packetizer is only ever entered by one thread at a time.
             guard let self, let packetizer = self.packetizer else { return }
@@ -389,37 +595,6 @@ final class StreamController: ObservableObject {
             self.statsLock.unlock()
             self.maybeWriteSDP()
         }
-        try encoder.start()
-        let encoderWarnings = encoder.warnings
-
-        let capture = CaptureEngine()
-        capture.onFrame = { [weak self] pixelBuffer, time in
-            self?.handleCapturedFrame(pixelBuffer, time)
-        }
-        capture.onStreamStopped = { [weak self] error in
-            guard let self else { return }
-            self.onMain { self.lastError = "Capture stopped: \(error.localizedDescription)" }
-            self.stop()
-        }
-
-        encodeQueue.sync {
-            self.sender = sender
-            self.packetizer = packetizer
-            self.control = control
-            self.encoder = encoder
-            self.capture = capture
-            self.lastEncodeSubmitTime = CFAbsoluteTimeGetCurrent()
-        }
-
-        try await capture.start(displayID: captureDisplayID,
-                                width: settings.width,
-                                height: settings.height,
-                                frameRate: settings.frameRate,
-                                showsCursor: settings.showsCursor)
-
-        onMain { self.warnings = pathWarnings + encoderWarnings }
-        startIdleHeartbeat()
-        await MainActor.run { self.startStatsTimer() }
     }
 
     /// Returns the CGDirectDisplayID to capture, creating a virtual display
@@ -441,6 +616,8 @@ final class StreamController: ObservableObject {
                                            refreshRate: Double(settings.frameRate),
                                            name: "LanScreen")
         virtualDisplay = display
+        activeSourceDescription =
+            "Virtual display \(display.displayID) — \(display.width)×\(display.height)"
 
         // The window server needs a moment to publish the new display before
         // SCShareableContent will list it.
@@ -454,7 +631,14 @@ final class StreamController: ObservableObject {
     }
 
     private func teardown() async {
+        // First: a stream that stops with a key held would leave it held.
+        injector?.releaseAll()
+        injector = nil
+        setInputAccepted(false)
         endFullPerformance()
+        cursorTracker?.stop(); cursorTracker = nil
+        volumeTimer?.cancel(); volumeTimer = nil
+        audioSender?.flush(); audioSender = nil
         idleTimer?.cancel(); idleTimer = nil
         wakeRetryTimer?.cancel(); wakeRetryTimer = nil
         await MainActor.run { self.statsTimer?.invalidate(); self.statsTimer = nil }
@@ -531,11 +715,169 @@ final class StreamController: ObservableObject {
     /// unless a keyframe was asked for, and when one is asked for, waiting up
     /// to a second to answer was the slowest part of recovering from a lost
     /// packet on an otherwise still screen.
+    /// Sends everything the client is told rather than asked -- volume, audio
+    /// delay, screen brightness -- now and every two seconds after. The control
+    /// channel is UDP, so a single message can go missing; repeating costs
+    /// nothing and means the iMac is never left at a setting nobody chose.
+    private func startClientSettingsUpdates(control: ControlChannel) {
+        volumeTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: encodeQueue)
+        timer.schedule(deadline: .now(), repeating: 2.0, leeway: .milliseconds(250))
+        timer.setEventHandler { [weak self, weak control] in
+            guard let self, let control else { return }
+            self.pushClientSettings(control)
+        }
+        timer.resume()
+        volumeTimer = timer
+    }
+
+    private func pushClientSettings(_ control: ControlChannel) {
+        var buffer = [UInt8](repeating: 0, count: Int(LS_CTRL_MAX_SIZE))
+        if sendsAudioNow {
+            var n = ls_ctrl_build_volume(&buffer, buffer.count,
+                                         settings.audioVolumeThousandths)
+            if n > 0 { control.send(buffer, count: Int(n)) }
+            n = ls_ctrl_build_audio_delay(&buffer, buffer.count, settings.audioDelayWireValue)
+            if n > 0 { control.send(buffer, count: Int(n)) }
+        }
+        var n = ls_ctrl_build_brightness(&buffer, buffer.count,
+                                         settings.clientBrightnessThousandths)
+        if n > 0 { control.send(buffer, count: Int(n)) }
+
+        // Whether input will be acted on, told to the client every time so it
+        // never takes the iMac's mouse away from it for nothing -- which is
+        // what would happen if it grabbed the pointer while this side had no
+        // permission to post a single event.
+        let trusted = InputInjector.isTrusted
+        let accepting = settings.acceptInput && trusted
+        let reason = !settings.acceptInput ? LS_INPUT_OFF_IN_SETTINGS
+                   : !trusted ? LS_INPUT_NEEDS_PERMISSION : LS_INPUT_OK
+        inputLock.lock()
+        let wasAccepting = inputAccepted
+        inputAccepted = accepting
+        inputLock.unlock()
+        if wasAccepting && !accepting { injector?.releaseAll() }
+        n = ls_ctrl_build_input_status(&buffer, buffer.count,
+                                       accepting ? 1 : 0, UInt8(reason))
+        if n > 0 { control.send(buffer, count: Int(n)) }
+        if trusted != inputTrusted { onMain { self.inputTrusted = trusted } }
+    }
+
+    /// Whether audio is actually going out, so the audio-only messages are not
+    /// sent to a client that is not playing any.
+    private var sendsAudioNow: Bool { audioSender != nil }
+
+    /// Pushes a change straight out rather than waiting for the next repeat, so
+    /// dragging a slider is heard, or seen, as you drag it.
+    func sendClientSettingsNow() {
+        guard isRunning else { return }
+        encodeQueue.async { [weak self] in
+            guard let self, let control = self.control else { return }
+            self.pushClientSettings(control)
+        }
+    }
+
+    /// Kept for the volume slider's own call site.
+    func sendVolumeNow() { sendClientSettingsNow() }
+
+    /// Retune the running encoder for the current mode.
+    ///
+    /// This replaces the compression session rather than setting a property on
+    /// it, because setting the property does not work. `AverageBitRate` on a
+    /// live session returns `noErr` and changes nothing: asked to go from 25 to
+    /// 60 Mb/s mid-stream on content that wanted every bit of it, the encoder
+    /// carried on emitting 24.6, 24.8, 24.6, 30.1, 23.9 Mb/s. That is what
+    /// "Video mode does not change the stats" was. A fresh session at 60 Mb/s
+    /// delivers 60.3.
+    ///
+    /// Rebuilding costs a keyframe and a few tens of milliseconds. The SPS may
+    /// change with it, so the parameter set cache is dropped and the next frame
+    /// forced to an IDR -- the client rebuilds its decode session when the SPS
+    /// changes, which it already does for a client that reconnects.
+    ///
+    /// The plan is rebuilt rather than patched, so the mode goes through the
+    /// same one place every other setting does and the UI's greying stays
+    /// truthful.
+    func applyEncoderModeNow() {
+        guard isRunning else { return }
+        let rebuilt = StreamPlan(settings: settings,
+                                 linkMTU: startedWithLinkMTU,
+                                 clientPlaysAudio: client.hasSaidHello ? client.playsAudio : nil,
+                                 clientSetsBrightness: client.hasSaidHello
+                                     ? client.setsBrightness : nil,
+                                 clientSendsInput: client.hasSaidHello ? client.sendsInput : nil)
+        onMain { self.plan = rebuilt }
+        encodeQueue.async { [weak self] in
+            guard let self, let outgoing = self.encoder else { return }
+
+            // The old session is stopped before the new one starts, and the
+            // order matters. VideoToolbox serialises output callbacks within a
+            // session but not between two of them, and both would be calling
+            // the same packetizer, which owns one packet buffer. Overlapping
+            // them for even a few milliseconds would interleave two frames'
+            // bytes into the same datagram. `stop()` runs CompleteFrames and
+            // Invalidate, so when it returns no further callbacks can arrive.
+            outgoing.stop()
+            self.encoder = nil
+
+            let replacement = self.makeEncoder(for: rebuilt)
+            do {
+                try replacement.start()
+            } catch {
+                // There is no encoder left to fall back to, so say so plainly
+                // rather than leaving a stream that is running and silent.
+                self.onMain {
+                    self.lastError = "Could not switch mode: \(error.localizedDescription)"
+                    self.stop()
+                }
+                return
+            }
+            self.encoder = replacement
+            // The profile can differ across the switch, so the client needs the
+            // new parameter sets and an IDR to start from.
+            self.packetizer?.invalidateParameterSetCache()
+            self.forceKeyframeFlag = true
+            let warnings = replacement.warnings
+            self.onMain { self.warnings = warnings }
+        }
+    }
+
+    /// Outside the async teardown, because NSLock is not to be taken across a
+    /// suspension point and Swift 6 will refuse it there.
+    private func setInputAccepted(_ value: Bool) {
+        inputLock.lock(); inputAccepted = value; inputLock.unlock()
+    }
+
+    /// Shows the system's Accessibility prompt, and re-checks shortly after so
+    /// the panel and the client catch up once it has been granted.
+    func requestInputPermission() {
+        InputInjector.requestTrust()
+        for delay in [2.0, 5.0, 10.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                self.inputTrusted = InputInjector.isTrusted
+                self.sendClientSettingsNow()
+            }
+        }
+    }
+
+    /// The bitrate the running stream is actually using, for the meter to
+    /// scale against. Falls back to what the settings would produce before a
+    /// stream exists.
+    var activeBitrateMbps: Double {
+        Double(plan?.bitrateBitsPerSecond
+               ?? (settings.videoMode ? settings.videoBitrateBitsPerSecond
+                                      : settings.bitrateBitsPerSecond)) / 1_000_000
+    }
+
     private func startIdleHeartbeat() {
         let timer = DispatchSource.makeTimerSource(queue: encodeQueue)
         timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
         timer.setEventHandler { [weak self] in
-            guard let self, let encoder = self.encoder else { return }
+            guard let self else { return }
+            // A key held on this Mac by a client that has since gone quiet.
+            self.injector?.watchdog()
+            guard let encoder = self.encoder else { return }
             guard self.forceKeyframeFlag else { return }
 
             // If frames are still arriving, the capture path will pick the flag
@@ -571,7 +913,9 @@ final class StreamController: ObservableObject {
     }
 
     private func tickStats() {
-        let bytes = encodeQueue.sync { self.packetizer?.bytesSent ?? 0 }
+        let (bytes, drops) = encodeQueue.sync {
+            (self.packetizer?.bytesSent ?? 0, self.sender?.dropped ?? 0)
+        }
 
         statsLock.lock()
         let frames = framesThisPeriod
@@ -588,6 +932,7 @@ final class StreamController: ObservableObject {
 
         onMain {
             self.outgoingMbps = Double(delta) * 8.0 / 1_000_000.0
+            self.packetsNotSent = drops
             self.encodedFPS = Double(frames)
             self.encodeMilliseconds = frames > 0 ? millis / Double(frames) : 0
             if pipelineSamples > 0 {
@@ -602,8 +947,16 @@ final class StreamController: ObservableObject {
     /// the app keeps a history otherwise, and by the time you notice a
     /// degradation the numbers that would explain it are gone.
     ///
-    ///     log show --predicate 'subsystem == "com.lanscreen.host"' --last 15m
+    ///     LS_LOG=1 open -a LanScreenHost
     ///     log stream --predicate 'subsystem == "com.lanscreen.host"'
+    ///     log show --predicate 'subsystem == "com.lanscreen.host"' --last 15m
+    ///
+    /// Off unless `LS_LOG` is set. Not because it was expensive -- this exact
+    /// line with all fifteen of its interpolations measured 2.16 us, which once
+    /// a second is 0.0002% of one core, and the whole running commentary is not
+    /// detectable in any number this app reports. It is off because a stream
+    /// that is behaving does not need a diary, and turning it on is one word on
+    /// the command line when one is wanted.
     ///
     /// At `notice`, not `info`. Info-level messages live in a memory ring
     /// buffer and are evicted, so the first version of this had already lost
@@ -611,7 +964,7 @@ final class StreamController: ObservableObject {
     /// packet size was chosen — by the time anyone came to read it. Which is
     /// the one thing a record of what happened must not do.
     private func logStatsLine() {
-        guard isRunning else { return }
+        guard isRunning, StreamController.logsProgress else { return }
         let uptime = Int(Date().timeIntervalSince(startedAt ?? Date()))
         StreamController.statsLog.notice("""
             t=\(uptime, privacy: .public)s \
@@ -626,11 +979,23 @@ final class StreamController: ObservableObject {
             dropped=\(self.client.stats.frames_dropped, privacy: .public) \
             corrupt=\(self.client.stats.frames_corrupt, privacy: .public) \
             keyframes=\(self.keyframeRequests, privacy: .public) \
+            audio_under=\(self.client.stats.audio_underruns, privacy: .public) \
+            audio_over=\(self.client.stats.audio_overruns, privacy: .public) \
+            audio_buf=\(Double(self.client.stats.audio_buffered_us) / 1000, format: .fixed(precision: 1), privacy: .public)ms \
             fullperf=\(self.fullPerformanceHeld, privacy: .public)
             """)
     }
 
     static let statsLog = Logger(subsystem: "com.lanscreen.host", category: "stats")
+
+    /// Whether to keep a running commentary. Read once: an environment
+    /// variable cannot change under a running process, and this is consulted
+    /// on a path that runs every second.
+    ///
+    /// Errors are not covered by this. A failure that is never written down is
+    /// a failure nobody can explain afterwards, and those cost nothing because
+    /// they do not happen.
+    static let logsProgress = ProcessInfo.processInfo.environment["LS_LOG"] != nil
 
     // MARK: - SDP, for testing with VLC/ffplay before touching the iMac
 
@@ -654,5 +1019,45 @@ final class StreamController: ObservableObject {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("lanscreen.sdp")
         try? sdp.write(to: url, atomically: true, encoding: .utf8)
         onMain { self.sdpPath = url.path }
+    }
+}
+
+// Lives here rather than beside the snapshot code because these setters are
+// private on purpose: nothing outside this file gets to invent stream state.
+extension StreamController {
+    /// Plausible mid-stream numbers, for `--render-ui` only. Nothing in the app
+    /// calls this.
+    func applyPreviewState(decoderFlags: UInt32 = UInt32(LS_DECODER_KNOWN | LS_DECODER_HARDWARE)) {
+        isRunning = true
+        statusText = "Streaming to 10.0.0.2:5004"
+        outgoingMbps = 23.4
+        encodedFPS = 59
+        hostPipelineMilliseconds = 9.4
+        keyframeRequests = 3
+        fullPerformanceHeld = true
+        activeSourceDescription = "Virtual display 1920×1080 @ 60"
+        // A clamped packet size, so the snapshot exercises the jumbo-frame
+        // hint. The preview is the only thing that looks at this panel without
+        // a stream running, so anything it does not set is never seen.
+        linkMTUBytes = 1500
+        effectiveMTUPayload = 1472
+        linkInterfaceName = "en7"
+        packetsNotSent = 0
+        var state = ControlChannel.ClientState()
+        state.address = "10.0.0.2"
+        state.hasSaidHello = true
+        state.drawsCursor = true
+        state.rttMilliseconds = 0.31
+        state.stats.decode_us = 4200
+        state.stats.render_us = 1900
+        state.stats.frames_decoded = 18422
+        state.stats.frames_dropped = 2
+        state.stats.packets_lost = 0
+        state.stats.decoder_flags = decoderFlags
+        client = state
+        // Built the way a running stream builds it, so anything that reads the
+        // plan -- the bitrate the level note compares against -- sees the
+        // settings the snapshot set rather than whatever was there before.
+        plan = StreamPlan(settings: settings, linkMTU: 1500)
     }
 }

@@ -40,8 +40,44 @@
 
 - (void)sendStats:(const ls_stats *)stats;
 
+/// Sends a datagram that has already been built. Used for input, which is
+/// built by LSInputForwarder so that it can be tested without a socket.
+- (void)sendBytes:(const uint8_t *)bytes length:(size_t)length;
+
+/// Whether this build forwards its own keyboard and mouse. Told to the host in
+/// the HELLO.
+@property (nonatomic, assign) BOOL canSendInput;
+
+/// Whether the host will act on input, and if not, why (LS_INPUT_*). Repeated
+/// every couple of seconds. Fires on the control thread.
+@property (nonatomic, copy) void (^inputStatusChanged)(BOOL accepting, uint8_t reason);
+
 /// Fired on the control thread when the host says goodbye.
+/// Playback volume the host wants, 0 to 1. Repeated every couple of seconds,
+/// so a lost one heals itself.
+@property (nonatomic, copy) void (^volumeChanged)(float volume);
+
+/// How long to hold audio before playing it, in milliseconds. Negative means
+/// hold less than the default, which pulls the sound earlier.
+@property (nonatomic, copy) void (^audioDelayChanged)(int delayMilliseconds);
+
+/// Panel brightness the host wants, 0 to 1.
+@property (nonatomic, copy) void (^brightnessChanged)(float brightness);
+
+/// Whether this machine's display actually took a brightness reading. Told to
+/// the host in the HELLO so it can grey the control out rather than pretending.
+@property (nonatomic, assign) BOOL canSetBrightness;
+
 @property (nonatomic, copy) void (^hostSaidGoodbye)(void);
+
+/// The pointer, sent separately from the video so it is not a whole
+/// encode-send-decode round trip out of date. Both fire on the control thread.
+@property (nonatomic, copy) void (^cursorMoved)(uint16_t x, uint16_t y,
+                                                BOOL visible, uint16_t imageID);
+@property (nonatomic, copy) void (^cursorImageChanged)(uint16_t imageID,
+                                                       uint16_t width, uint16_t height,
+                                                       uint16_t hotspotX, uint16_t hotspotY,
+                                                       NSData *rgba);
 
 @property (nonatomic, readonly) NSTimeInterval lastHostContact;
 
@@ -49,5 +85,16 @@
 /// or nil if it could not be determined. Sent to the host in HELLO so it can
 /// wake this machine later.
 @property (nonatomic, readonly) NSString *localMACString;
+
+/// How many pointer updates have been taken off the socket.
+///
+/// The host sends these at a fixed rate, so this falling short of that rate is
+/// the signature of the control thread being blocked on something it should not
+/// be doing -- drawing, for instance, which under vsync waits for the next
+/// vertical blank and so can only ever service half of them.
+@property (nonatomic, readonly) uint32_t cursorMessagesReceived;
+/// How many times the control socket had to be replaced because it stopped
+/// working. Normally zero for the life of a session.
+@property (nonatomic, readonly) uint32_t socketRestarts;
 
 @end

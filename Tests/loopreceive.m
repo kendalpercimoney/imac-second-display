@@ -20,6 +20,9 @@
 //  Usage: lsloopreceive <port> <expectedFrames> <timeoutSeconds>
 //
 #import <Foundation/Foundation.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #import "LSReceiver.h"
 #import "LSDepacketizer.h"
 #import "LSDecoder.h"
@@ -31,11 +34,16 @@
 @property (nonatomic, assign) OSType   pixelFormat;
 @property (nonatomic, assign) size_t   frameWidth;
 @property (nonatomic, assign) size_t   frameHeight;
-/// framesDropped at the moment the first frame came out, so the assertions
-/// below can talk about steady state rather than about startup.
+/// framesDropped and queueOverflows at the moment the first frame came out, so
+/// the assertions below can talk about steady state rather than about startup.
 @property (nonatomic, assign) uint32_t dropsAtFirstFrame;
+@property (nonatomic, assign) uint32_t overflowsAtFirstFrame;
 @property (nonatomic, strong) NSMutableArray *latencySamples;   // NSNumber, ms
 @property (nonatomic, strong) LSDecoder *decoder;
+@property (nonatomic, assign) int keyframeSocket;
+@property (nonatomic, assign) struct sockaddr_in keyframeAddress;
+@property (nonatomic, assign) NSTimeInterval lastKeyframeAsk;
+- (void)askForKeyframe;
 @end
 
 @implementation LoopHarness
@@ -48,11 +56,26 @@
             isKeyframe:(BOOL)isKeyframe
 {
     _accessUnits++;
-    [_decoder submitAccessUnit:avcc sps:sps pps:pps timestamp:timestamp];
+    [_decoder submitAccessUnit:avcc sps:sps pps:pps timestamp:timestamp
+                    isKeyframe:isKeyframe];
 }
 
 - (void)depacketizerNeedsKeyframe:(LSDepacketizer *)depacketizer {
     _keyframeRequests++;
+    [self askForKeyframe];
+}
+
+/// The real client's keyframe request, cut down: one datagram to the sender's
+/// keyframe port, at most ten a second, exactly the rate the control channel
+/// allows.
+- (void)askForKeyframe {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - _lastKeyframeAsk < 0.1) return;
+    _lastKeyframeAsk = now;
+    if (_keyframeSocket < 0) return;
+    uint8_t byte = 1;
+    sendto(_keyframeSocket, &byte, 1, 0,
+           (const struct sockaddr *)&_keyframeAddress, sizeof(_keyframeAddress));
 }
 
 @end
@@ -70,12 +93,24 @@ int main(int argc, const char *argv[]) {
 
         LSDecoder *decoder = [[LSDecoder alloc] init];
         harness.decoder = decoder;
+
+        harness.keyframeSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        struct sockaddr_in keyframeAddress;
+        memset(&keyframeAddress, 0, sizeof(keyframeAddress));
+        keyframeAddress.sin_len = sizeof(keyframeAddress);
+        keyframeAddress.sin_family = AF_INET;
+        keyframeAddress.sin_port = htons((uint16_t)(port + 1));
+        keyframeAddress.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        harness.keyframeAddress = keyframeAddress;
+        __unsafe_unretained LoopHarness *keyframeHarness = harness;
+        decoder.keyframeNeeded = ^{ [keyframeHarness askForKeyframe]; };
         // The decoder owns the block, so capture it weakly or the two keep each
         // other alive.
         __unsafe_unretained LSDecoder *weakDecoder = decoder;
         decoder.frameHandler = ^(CVPixelBufferRef pixelBuffer, CMTime presentationTime) {
             if (harness.pixelBuffers == 0) {
                 harness.dropsAtFirstFrame = [weakDecoder framesDropped];
+                harness.overflowsAtFirstFrame = [weakDecoder queueOverflows];
             }
             harness.pixelBuffers++;
 
@@ -149,23 +184,28 @@ int main(int argc, const char *argv[]) {
                [decoder decodeMicrosecondsLast] / 1000.0,
                [decoder decodeMicrosecondsPeak] / 1000.0);
         uint32_t steadyDrops = [decoder framesDropped] - harness.dropsAtFirstFrame;
-        printf("frames dropped by queue: %u total (%u during startup, %u after)\n",
-               [decoder framesDropped], harness.dropsAtFirstFrame, steadyDrops);
+        uint32_t steadyOverflows = [decoder queueOverflows] - harness.overflowsAtFirstFrame;
+        printf("decoding fell behind %u times after startup, refusing %u frames "
+               "(%u refused during startup)\n",
+               steadyOverflows, steadyDrops, harness.dropsAtFirstFrame);
 
         // Building the decompression session takes tens of milliseconds, and
         // the queue is deliberately only two deep, so whatever arrives during
-        // that first decode is dropped on purpose.
+        // that first decode is refused on purpose.
         //
-        // What matters afterwards is that the client keeps up. A single drop on
-        // a loaded machine is the shallow queue doing its job -- shedding a
-        // stale frame rather than accumulating latency -- so tolerate a couple
-        // and fail only on systematic falling behind. The count is printed
-        // either way, so a creeping regression stays visible.
-        uint32_t allowedDrops = harness.pixelBuffers / 50;   // 2%
-        if (allowedDrops < 2) allowedDrops = 2;
-        if (steadyDrops > allowedDrops) {
-            printf("RESULT: FAIL (%u frames dropped after startup, tolerating %u)\n",
-                   steadyDrops, allowedDrops);
+        // What matters afterwards is that the client keeps up, so this counts
+        // the times it fell behind, not the frames that cost. Once the queue
+        // overflows, nothing more is decoded until a keyframe -- decoding a
+        // frame whose predecessor was skipped is what moshes the picture -- and
+        // this harness never asks the sender for one, so a single overflow
+        // refuses everything up to the next scheduled keyframe. The real client
+        // asks at once and waits a round trip. A single overflow on a loaded
+        // machine is tolerated; systematically falling behind is not.
+        uint32_t allowedOverflows = harness.pixelBuffers / 50;   // 2%
+        if (allowedOverflows < 2) allowedOverflows = 2;
+        if (steadyOverflows > allowedOverflows) {
+            printf("RESULT: FAIL (decoding fell behind %u times after startup, tolerating %u)\n",
+                   steadyOverflows, allowedOverflows);
             return 1;
         }
         if (harness.pixelBuffers < expect) {

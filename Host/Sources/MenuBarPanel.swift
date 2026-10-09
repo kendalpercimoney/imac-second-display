@@ -1,0 +1,631 @@
+// This file is part of LanScreen.
+// Copyright (C) 2026 Kendal Percimoney
+//
+// LanScreen is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version.
+//
+// LanScreen is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+// A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along with
+// this program. If not, see <https://www.gnu.org/licenses/>.
+
+import SwiftUI
+import AppKit
+import LSProtocol
+
+// The menu bar is now the app. Everything you touch while streaming — start,
+// stop, the live numbers, the three switches that actually change how it feels —
+// is here. The settings window still exists for the things you set once.
+
+extension StreamController {
+    /// Capture to wire is measured on this side, the network is half the round
+    /// trip, and the client reports its own decode and render. Shared by the
+    /// panel and the settings window so the two cannot disagree.
+    var estimatedGlassToGlassMilliseconds: Double {
+        hostPipelineMilliseconds
+            + client.rttMilliseconds / 2.0
+            + Double(client.stats.decode_us) / 1000.0
+            + Double(client.stats.render_us) / 1000.0
+    }
+}
+
+struct MenuBarPanel: View {
+    @ObservedObject var settings: StreamSettings
+    @ObservedObject var controller: StreamController
+
+    // No ScrollView here, and that is deliberate rather than an oversight. A
+    // MenuBarExtra popover takes its size from its content, and a ScrollView
+    // has no height of its own to give it -- it fills whatever it is handed,
+    // which in a popover is nothing. Wrapping the body in one made the panel
+    // stop appearing at all. The way to make this fit a laptop screen is for it
+    // to be shorter, not for it to scroll.
+    var body: some View {
+        VStack(spacing: 0) {
+            titleBar
+            VStack(spacing: 9) {
+                startButton
+                meters
+                pictureGroup
+                linkGroup
+                audioGroup
+                screenGroup
+                switchesGroup
+                if let error = controller.lastError { notice(error, colour: Aero.red) }
+                if !controller.warnings.isEmpty {
+                    notice("Encoder hints the hardware declined: "
+                           + controller.warnings.joined(separator: ", "),
+                           colour: Aero.amber)
+                }
+                footer
+            }
+            .padding(.horizontal, 11)
+            .padding(.top, 10)
+            .padding(.bottom, 11)
+        }
+        .frame(width: 372)
+        .background(Aero.GlassBackground())
+        .toggleStyle(AeroToggleStyle())
+        .environment(\.colorScheme, .light)
+    }
+
+    // MARK: - Title bar
+
+    /// The deep blue caption bar off the top of an Aero window, complete with
+    /// the gloss break halfway down and a lit bottom edge.
+    private var titleBar: some View {
+        HStack(spacing: 9) {
+            Aero.Orb(colour: orbColour, diameter: 12, lit: controller.isRunning)
+                .padding(.leading, 2)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text("LanScreen")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.45), radius: 1.5, y: 0.5)
+                }
+                Text(controller.statusText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .shadow(color: .black.opacity(0.4), radius: 1, y: 0.5)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            ZStack(alignment: .bottom) {
+                LinearGradient(colors: [Aero.chromeTop, Aero.chromeBottom],
+                               startPoint: .top, endPoint: .bottom)
+                Aero.Gloss(cornerRadius: 0, strength: 0.42)
+                RadialGradient(colors: [.white.opacity(0.32), .clear],
+                               center: UnitPoint(x: 0.12, y: 0),
+                               startRadius: 0, endRadius: 190)
+                // The reflection every Aero caption bar had: a wide, shallow
+                // ellipse of light hanging off the top edge.
+                Ellipse()
+                    .fill(LinearGradient(colors: [.white.opacity(0.34), .white.opacity(0.02)],
+                                         startPoint: .top, endPoint: .bottom))
+                    .frame(width: 520, height: 44)
+                    .offset(x: -30, y: -20)
+                    .blur(radius: 5)
+                    .allowsHitTesting(false)
+                Rectangle().fill(.white.opacity(0.55)).frame(height: 1)
+            }
+        )
+    }
+
+    private var orbColour: Color {
+        if controller.lastError != nil { return Aero.red }
+        if !controller.isRunning { return Color(white: 0.55) }
+        return controller.client.hasSaidHello ? Aero.green : Aero.amber
+    }
+
+    // MARK: - The one button that matters
+
+    private var startButton: some View {
+        HStack(spacing: 8) {
+            Button {
+                controller.isRunning ? controller.stop() : controller.start()
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: controller.isRunning ? "stop.fill" : "play.fill")
+                        .font(.system(size: 11, weight: .bold))
+                    Text(controller.isRunning ? "Stop streaming" : "Start streaming")
+                }
+            }
+            .buttonStyle(AeroButtonStyle(kind: controller.isRunning ? .stop : .primary, big: true))
+            .keyboardShortcut(.return, modifiers: [])
+
+            Button {
+                controller.requestKeyframeNow()
+            } label: {
+                Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .bold))
+            }
+            .buttonStyle(AeroButtonStyle(big: true))
+            .frame(width: 38)
+            .disabled(!controller.isRunning)
+            .help("Force a keyframe")
+        }
+    }
+
+    // MARK: - Meters
+
+    private var meters: some View {
+        Aero.Group(title: "Throughput", accent: Aero.green) {
+            VStack(spacing: 5) {
+                Aero.Meter(label: "Sending",
+                           value: String(format: "%.1f Mb/s", controller.outgoingMbps),
+                           fraction: controller.outgoingMbps / max(controller.activeBitrateMbps, 1),
+                           colour: Aero.green, live: controller.isRunning)
+                Aero.Meter(label: "Encoding",
+                           value: String(format: "%.0f fps", controller.encodedFPS),
+                           fraction: controller.encodedFPS / Double(max(settings.frameRate, 1)),
+                           colour: Aero.blue, live: controller.isRunning)
+                Aero.Meter(label: "Glass to glass",
+                           value: latencyReady ? String(format: "%.0f ms", latency) : "—",
+                           // Half the bar is 25 ms, which is about where the
+                           // pointer stops feeling attached to your hand.
+                           fraction: latencyReady ? latency / 50 : 0,
+                           colour: latencyColour, live: controller.isRunning && latencyReady)
+            }
+        }
+    }
+
+    private var latency: Double { controller.estimatedGlassToGlassMilliseconds }
+    private var latencyReady: Bool { controller.isRunning && controller.client.stats.decode_us > 0 }
+    private var latencyColour: Color {
+        latency < 20 ? Aero.green : (latency < 35 ? Aero.amber : Aero.red)
+    }
+
+    // MARK: - Link
+
+    private var linkGroup: some View {
+        Aero.Group(title: "Link", accent: Aero.violet) {
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
+                GridRow {
+                    // ClientState starts at an em dash rather than at "", so
+                    // fall back on anything that is not an actual address.
+                    readout("Client", controller.client.hasSaidHello
+                            ? controller.client.address : settings.clientAddress)
+                    readout("RTT", controller.client.rttMilliseconds > 0
+                            ? String(format: "%.2f ms", controller.client.rttMilliseconds) : "—")
+                    readout("Lost", "\(controller.client.stats.packets_lost)",
+                            alarm: controller.client.stats.packets_lost > 0)
+                }
+                GridRow {
+                    readout("Decode", controller.client.stats.decode_us > 0
+                            ? String(format: "%.2f ms", Double(controller.client.stats.decode_us) / 1000) : "—")
+                    readout("Render", controller.client.stats.render_us > 0
+                            ? String(format: "%.2f ms", Double(controller.client.stats.render_us) / 1000) : "—")
+                    readout("Dropped", "\(controller.client.stats.frames_dropped)",
+                            alarm: controller.client.stats.frames_dropped > 0)
+                }
+                GridRow {
+                    readout("Link MTU", controller.linkMTUBytes > 0
+                            ? "\(controller.linkMTUBytes) B" : "—")
+                    // Red when it is not what was asked for: that means the
+                    // link could not carry the configured size.
+                    readout("Packet", controller.effectiveMTUPayload > 0
+                            ? "\(controller.effectiveMTUPayload) B" : "—",
+                            alarm: controller.effectiveMTUPayload > 0
+                                && controller.effectiveMTUPayload != settings.mtuPayload)
+                    readout("Keyframes", "\(controller.keyframeRequests)")
+                }
+                GridRow {
+                    // Not the same thing as the client's Lost: these never
+                    // left this Mac, so the client cannot know about them.
+                    readout("Not sent", "\(controller.packetsNotSent)",
+                            alarm: controller.packetsNotSent > 0)
+                    readout("Corrupt", "\(controller.client.stats.frames_corrupt)",
+                            alarm: controller.client.stats.frames_corrupt > 0)
+                    readout("Decoder", decoderLabel, alarm: decodingInSoftware)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if jumboAvailable { jumboHint }
+
+            if settings.forwardCursor && controller.client.hasSaidHello
+                && !controller.client.drawsCursor {
+                Text("This client cannot draw the pointer. Rebuild it, or turn the "
+                     + "pointer switch off.")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Aero.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            }
+        }
+    }
+
+    // MARK: - How the client is decoding
+
+    private var decoderFlags: UInt32 { controller.client.stats.decoder_flags }
+    private var decoderKnown: Bool { decoderFlags & UInt32(LS_DECODER_KNOWN) != 0 }
+
+    private var decodingInSoftware: Bool {
+        controller.isRunning && decoderKnown
+            && decoderFlags & UInt32(LS_DECODER_HARDWARE) == 0
+    }
+
+    /// "—" covers both "no stream yet" and "a client too old to say". Neither
+    /// is evidence of anything, and must not look like software.
+    private var decoderLabel: String {
+        guard controller.isRunning, decoderKnown else { return "—" }
+        return decodingInSoftware ? "software" : "hardware"
+    }
+
+    /// Only said when both halves have actually been observed: the client
+    /// reports software decode, and the stream really is above the Level 4.2
+    /// ceiling. Software decode below it is a different problem and gets the
+    /// red readout without a guess attached.
+    private var softwareBecauseOfLevel: Bool {
+        decodingInSoftware
+            && controller.activeBitrateMbps * 1_000_000
+                > Double(StreamPlan.level42MaxBitsPerSecond)
+    }
+
+    /// Whether the configured packet size is being cut down to fit the link,
+    /// which is the only situation in which raising the MTU would change
+    /// anything.
+    private var jumboAvailable: Bool {
+        controller.isRunning
+            && controller.effectiveMTUPayload > 0
+            && controller.effectiveMTUPayload != settings.mtuPayload
+    }
+
+    /// Jumbo frames are a property of the cable and both machines, not of this
+    /// app, so the app cannot turn them on. It can at least say exactly what to
+    /// type, on which interface, rather than leaving "Packet 1472 B" in red
+    /// with no way to act on it.
+    private var jumboHint: some View {
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("For the full \(String(settings.mtuPayload)) B, on both machines:")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Aero.inkFaint)
+                Text(jumboCommand)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(Aero.ink)
+                    .textSelection(.enabled)
+                    .lineLimit(1).minimumScaleFactor(0.8)
+            }
+            Spacer(minLength: 0)
+            Button("Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(jumboCommand, forType: .string)
+            }
+            .buttonStyle(AeroButtonStyle())
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 6).padding(.vertical, 4)
+        .padding(.top, 4)
+    }
+
+    private var jumboCommand: String {
+        let name = controller.linkInterfaceName.isEmpty ? "en0" : controller.linkInterfaceName
+        return "sudo ifconfig \(name) mtu 9000"
+    }
+
+    private func readout(_ label: String, _ value: String, alarm: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Aero.inkFaint)
+            Text(value)
+                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(alarm ? Aero.red : Aero.ink)
+                .lineLimit(1)
+        }
+        .frame(width: 104, alignment: .leading)
+    }
+
+    // MARK: - Picture
+
+    /// The one control meant to be reached for mid-stream. The bitrate is
+    /// settable on a live encoder session, so it takes effect on the next
+    /// frame rather than restarting anything.
+    private var pictureGroup: some View {
+        Aero.Group(title: "Picture", accent: Aero.violet) {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Video mode", isOn: $settings.videoMode)
+                    .onChange(of: settings.videoMode) { _ in
+                        controller.applyEncoderModeNow()
+                    }
+
+                HStack(spacing: 7) {
+                    Image(systemName: "film")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Aero.inkFaint)
+                        .frame(width: 14)
+                    Slider(value: $settings.videoBitrateMbps, in: 20...120, step: 5)
+                    Text("\(Int(settings.videoBitrateMbps)) Mb/s")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Aero.ink)
+                        .frame(width: 58, alignment: .trailing)
+                }
+                .disabled(!settings.videoMode)
+                .opacity(settings.videoMode ? 1 : 0.5)
+                .onChange(of: settings.videoBitrateMbps) { _ in
+                    controller.applyEncoderModeNow()
+                }
+
+                if softwareBecauseOfLevel {
+                    Text("Above 50 Mb/s the stream is H.264 Level 5, and the iMac "
+                         + "is decoding it in software, which is what heats it up. "
+                         + "Try 50 Mb/s or less.")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Aero.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+            }
+        }
+    }
+
+    // MARK: - Audio
+
+    private var audioGroup: some View {
+        Aero.Group(title: "Audio", accent: Aero.blue) {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Send this Mac's audio", isOn: $settings.audioEnabled)
+                    .disabled(controller.isRunning)
+
+                HStack(spacing: 7) {
+                    Image(systemName: settings.audioVolume < 0.01
+                          ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Aero.inkFaint)
+                        .frame(width: 14)
+                    Slider(value: $settings.audioVolume, in: 0...1)
+                    Text("\(Int(settings.audioVolume * 100))%")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Aero.ink)
+                        .frame(width: 36, alignment: .trailing)
+                }
+                .disabled(!settings.audioEnabled)
+                .opacity(settings.audioEnabled ? 1 : 0.5)
+                // Pushed the moment it changes rather than waiting for the
+                // repeat, so dragging the slider is heard as you drag it.
+                .onChange(of: settings.audioVolume) { _ in controller.sendClientSettingsNow() }
+
+                HStack(spacing: 7) {
+                    Image(systemName: "timer")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Aero.inkFaint)
+                        .frame(width: 14)
+                    Slider(value: $settings.audioDelayMilliseconds,
+                           in: Double(LS_AUDIO_DELAY_MIN_MS)...Double(LS_AUDIO_DELAY_MAX_MS))
+                    Text(String(format: "%+.0f ms", settings.audioDelayMilliseconds))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Aero.ink)
+                        .frame(width: 52, alignment: .trailing)
+                }
+                .disabled(!settings.audioEnabled)
+                .opacity(settings.audioEnabled ? 1 : 0.5)
+                .onChange(of: settings.audioDelayMilliseconds) { _ in
+                    controller.sendClientSettingsNow()
+                }
+
+                if controller.isRunning && settings.audioEnabled && controller.client.playsAudio {
+                    HStack(spacing: 10) {
+                        readout("Buffered", controller.client.stats.audio_buffered_us > 0
+                                ? String(format: "%.0f ms",
+                                         Double(controller.client.stats.audio_buffered_us) / 1000)
+                                : "—")
+                        readout("Gaps", "\(controller.client.stats.audio_underruns)",
+                                alarm: controller.client.stats.audio_underruns > 0)
+                        readout("Dropped", "\(controller.client.stats.audio_overruns)",
+                                alarm: controller.client.stats.audio_overruns > 0)
+                    }
+                }
+
+                if settings.audioEnabled && controller.client.hasSaidHello
+                    && !controller.client.playsAudio {
+                    Text("This client cannot play audio. Rebuild it.")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Aero.red)
+                }
+            }
+        }
+    }
+
+    // MARK: - The iMac's screen
+
+    private var screenGroup: some View {
+        Aero.Group(title: "iMac screen", accent: Aero.amber) {
+            HStack(spacing: 7) {
+                Image(systemName: settings.clientBrightness < 0.01
+                      ? "sun.min" : "sun.max.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Aero.inkFaint)
+                    .frame(width: 14)
+                Slider(value: $settings.clientBrightness, in: 0...1)
+                Text("\(Int(settings.clientBrightness * 100))%")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Aero.ink)
+                    .frame(width: 36, alignment: .trailing)
+            }
+            .onChange(of: settings.clientBrightness) { _ in controller.sendClientSettingsNow() }
+            .disabled(brightnessUnavailable)
+            .opacity(brightnessUnavailable ? 0.5 : 1)
+
+            if brightnessUnavailable {
+                Text("This client's display does not expose brightness.")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Aero.red)
+            }
+        }
+    }
+
+    /// Only once the client has actually said so. Before that the control stays
+    /// live rather than being greyed out on a guess.
+    private var brightnessUnavailable: Bool {
+        controller.client.hasSaidHello && !controller.client.setsBrightness
+    }
+
+    // MARK: - The switches worth reaching for
+
+    private var switchesGroup: some View {
+        Aero.Group(title: "Responsiveness", accent: Aero.amber) {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Send the pointer separately", isOn: $settings.forwardCursor)
+                    .disabled(controller.isRunning)
+                Toggle("Use the iMac's keyboard and mouse", isOn: $settings.acceptInput)
+                    .onChange(of: settings.acceptInput) { _ in controller.sendClientSettingsNow() }
+                if settings.acceptInput && !controller.inputTrusted {
+                    // Without it every posted event silently goes nowhere, so
+                    // the client is told not to take the iMac's mouse at all.
+                    HStack(spacing: 6) {
+                        Text("Needs Accessibility permission.")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(Aero.red)
+                        Spacer(minLength: 0)
+                        Button("Allow…") { controller.requestInputPermission() }
+                            .buttonStyle(AeroButtonStyle())
+                            .controlSize(.small)
+                    }
+                    .padding(.leading, 2)
+                } else if settings.acceptInput && controller.client.hasSaidHello
+                            && !controller.client.sendsInput {
+                    Text("This client cannot send input. Rebuild it.")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Aero.red)
+                        .padding(.leading, 2)
+                }
+                Toggle("Keep this Mac at full performance", isOn: $settings.preventAppNap)
+
+                if controller.isRunning {
+                    HStack(spacing: 5) {
+                        Aero.Orb(colour: controller.fullPerformanceHeld ? Aero.green : Aero.amber,
+                                 diameter: 7)
+                        Text(controller.fullPerformanceHeld
+                             ? "Full performance asserted"
+                             : "Not asserted — macOS may throttle this app")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(Aero.inkFaint)
+                    }
+                    .padding(.leading, 2)
+                }
+            }
+        }
+    }
+
+    // MARK: - Footer
+
+    private var footer: some View {
+        HStack(spacing: 6) {
+            Button("Settings…") {
+                HostWindows.showSettings(settings: settings, controller: controller)
+            }
+            .buttonStyle(AeroButtonStyle())
+
+            Button("Wake iMac") { controller.wakeClient(reason: "Manual") }
+                .buttonStyle(AeroButtonStyle())
+                .disabled(settings.clientMACAddress.isEmpty)
+
+            Spacer(minLength: 0)
+
+            Button("Quit") { NSApp.terminate(nil) }
+                .buttonStyle(AeroButtonStyle())
+                .keyboardShortcut("q", modifiers: [.command])
+        }
+    }
+
+    private func notice(_ text: String, colour: Color) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: colour == Aero.red
+                  ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(colour)
+            Text(text)
+                .font(.system(size: 9.5))
+                .foregroundStyle(Aero.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(colour.opacity(0.14))
+                Aero.Bevel(cornerRadius: 5,
+                           edge: .white.opacity(0.5), border: colour.opacity(0.55))
+            }
+        )
+    }
+}
+
+// MARK: - The menu bar icon
+
+extension Aero {
+    /// Drawn rather than shipped as an asset, so it can carry the running state
+    /// in colour. Menu bar icons are normally templates; this one deliberately
+    /// is not, because the point of it is the green light.
+    /// - Parameter scale: drawn larger than the menu bar wants it, for the
+    ///   launch box — which exists to say what to look for up there, and cannot
+    ///   do that with a 19-point picture of it.
+    static func menuBarIcon(running: Bool, attention: Bool,
+                            scale: CGFloat = 1) -> NSImage {
+        let size = NSSize(width: 19 * scale, height: 16 * scale)
+        let image = NSImage(size: size, flipped: false) { _ in
+            if scale != 1 {
+                let transform = NSAffineTransform()
+                transform.scale(by: scale)
+                transform.concat()
+            }
+            let body = NSRect(x: 1.5, y: 3.5, width: 16, height: 11)
+            let screen = NSBezierPath(roundedRect: body, xRadius: 2, yRadius: 2)
+
+            let top    = running ? NSColor(srgbRed: 0.42, green: 0.70, blue: 0.95, alpha: 1)
+                                 : NSColor(srgbRed: 0.62, green: 0.65, blue: 0.70, alpha: 1)
+            let bottom = running ? NSColor(srgbRed: 0.10, green: 0.34, blue: 0.68, alpha: 1)
+                                 : NSColor(srgbRed: 0.34, green: 0.37, blue: 0.42, alpha: 1)
+            NSGradient(starting: top, ending: bottom)?.draw(in: screen, angle: -90)
+
+            // Gloss across the top half, clipped to the screen.
+            NSGraphicsContext.saveGraphicsState()
+            screen.addClip()
+            let gloss = NSRect(x: body.minX, y: body.midY, width: body.width, height: body.height / 2)
+            NSGradient(starting: NSColor(white: 1, alpha: 0.55),
+                       ending: NSColor(white: 1, alpha: 0.12))?.draw(in: gloss, angle: -90)
+            NSGraphicsContext.restoreGraphicsState()
+
+            NSColor(white: 0, alpha: 0.55).setStroke()
+            screen.lineWidth = 1
+            screen.stroke()
+
+            // Stand.
+            let stand = NSBezierPath(rect: NSRect(x: 7.5, y: 1.0, width: 4, height: 2.5))
+            NSColor(white: 0.35, alpha: 0.85).setFill()
+            stand.fill()
+            let foot = NSBezierPath(roundedRect: NSRect(x: 4.5, y: 0, width: 10, height: 1.8),
+                                    xRadius: 0.9, yRadius: 0.9)
+            foot.fill()
+
+            // The light.
+            let dot = NSRect(x: 12.0, y: 5.4, width: 4, height: 4)
+            let lamp = running ? (attention
+                                  ? NSColor(srgbRed: 1.0, green: 0.72, blue: 0.10, alpha: 1)
+                                  : NSColor(srgbRed: 0.45, green: 0.92, blue: 0.25, alpha: 1))
+                               : NSColor(white: 1, alpha: 0.35)
+            lamp.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            if running {
+                NSColor(white: 1, alpha: 0.75).setFill()
+                NSBezierPath(ovalIn: NSRect(x: dot.minX + 0.9, y: dot.minY + 2.0,
+                                            width: 1.5, height: 1.2)).fill()
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+}

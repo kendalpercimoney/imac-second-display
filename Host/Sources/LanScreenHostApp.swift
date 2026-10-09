@@ -19,358 +19,125 @@ import LSProtocol
 
 @main
 struct LanScreenHostApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var settings = StreamSettings()
     @StateObject private var controller: StreamController
 
     init() {
         let settings = StreamSettings()
         _settings = StateObject(wrappedValue: settings)
-        _controller = StateObject(wrappedValue: StreamController(settings: settings))
+        let controller = StreamController(settings: settings)
+        _controller = StateObject(wrappedValue: controller)
+        UnattendedRun.begin(settings: settings, controller: controller)
     }
 
     var body: some Scene {
-        Window("LanScreen Host", id: "main") {
-            ContentView(settings: settings, controller: controller)
-                .frame(minWidth: 560, minHeight: 620)
+        // The menu bar is the app. There is no window scene at all, because a
+        // SwiftUI `Window` opens itself at launch and this is not a thing you
+        // want a window for — the settings window is built on demand instead.
+        MenuBarExtra {
+            MenuBarPanel(settings: settings, controller: controller)
                 .task { await controller.refreshDisplays() }
+        } label: {
+            Image(nsImage: Aero.menuBarIcon(
+                running: controller.isRunning,
+                attention: controller.lastError != nil
+                    || (controller.isRunning && !controller.client.hasSaidHello)))
+                .renderingMode(.original)
         }
-        .windowResizability(.contentMinSize)
+        .menuBarExtraStyle(.window)
     }
 }
 
-struct ContentView: View {
-    @ObservedObject var settings: StreamSettings
-    @ObservedObject var controller: StreamController
+/// Runs as an accessory: no Dock icon, no menu bar of its own, just the status
+/// item. It becomes a regular app for as long as the settings window is open,
+/// so that window gets a real Edit menu — without one there is no Paste, and
+/// the MAC address field exists specifically to have something pasted into it.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if UISnapshot.runIfRequested() { NSApp.terminate(nil); return }
+        NSApp.setActivationPolicy(UnattendedRun.wantsWindow ? .regular : .accessory)
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                header
-                sourceSection
-                destinationSection
-                videoSection
-                networkSection
-                powerSection
-                Divider()
-                statsSection
-                if let error = controller.lastError { errorBox(error) }
-                if !controller.warnings.isEmpty { warningBox(controller.warnings) }
-            }
-            .padding(20)
+        // After the scene is up, so the icon the box is pointing at is already
+        // there when the box is dismissed.
+        DispatchQueue.main.async { Self.announceTheMenuBar() }
+    }
+
+    /// Says where the app went.
+    ///
+    /// An accessory app has no Dock icon and opens no window, so launching it
+    /// looks exactly like launching nothing. On a laptop with a notch the icon
+    /// may also be the far side of it, or pushed out of the menu bar entirely
+    /// by whatever else is up there, and then there is genuinely nothing to see
+    /// anywhere on screen.
+    ///
+    /// So the box carries the icon itself, at a size you can actually make out,
+    /// rather than describing it.
+    private static func announceTheMenuBar() {
+        guard !UnattendedRun.wantsWindow else { return }
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "ls.hideLaunchNotice") else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "LanScreen is running, in the menu bar"
+        alert.informativeText =
+            "There is no Dock icon and no window. Click this icon at the top of "
+            + "the screen to start streaming, reach Settings, or quit.\n\n"
+            + "If you cannot find it, the menu bar may be full — macOS hides the "
+            + "items that do not fit, and on a Mac with a notch they go behind it."
+        alert.icon = Aero.menuBarIcon(running: false, attention: false, scale: 6)
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't show this again"
+        alert.addButton(withTitle: "OK")
+
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+        if alert.suppressionButton?.state == .on {
+            defaults.set(true, forKey: "ls.hideLaunchNotice")
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(controller.isRunning ? Color.green : Color.secondary.opacity(0.4))
-                .frame(width: 10, height: 10)
-            Text(controller.statusText).font(.headline)
-            Spacer()
-            Button(controller.isRunning ? "Stop" : "Start") {
-                controller.isRunning ? controller.stop() : controller.start()
-            }
-            .keyboardShortcut(.return, modifiers: [.command])
-            .buttonStyle(.borderedProminent)
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+}
+
+/// The settings window, built by hand rather than as a SwiftUI scene so that it
+/// exists only once it is asked for.
+enum HostWindows {
+    private static var settings: NSWindow?
+    private static var observer: NSObjectProtocol?
+
+    static func showSettings(settings streamSettings: StreamSettings,
+                             controller: StreamController) {
+        if settings == nil {
+            let view = SettingsView(settings: streamSettings, controller: controller)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 600, height: 740),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered, defer: false)
+            window.title = "LanScreen Host"
+            window.contentView = NSHostingView(rootView: view)
+            window.contentMinSize = NSSize(width: 560, height: 480)
+            window.isReleasedWhenClosed = false
+            // Aero has no dark mode, so the window is pinned light and the
+            // titlebar is left to blend into the glass behind it.
+            window.appearance = NSAppearance(named: .aqua)
+            window.titlebarAppearsTransparent = true
+            window.backgroundColor = NSColor(srgbRed: 0.91, green: 0.96, blue: 1.0, alpha: 1)
+            window.center()
+            settings = window
+
+            observer = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
+                    // Back to an accessory once it is gone, or the Dock icon
+                    // outlives the only window that justified it. Except under
+                    // --with-window, where staying a regular app is the point.
+                    if !UnattendedRun.wantsWindow { NSApp.setActivationPolicy(.accessory) }
+                }
         }
-    }
-
-    private var destinationSection: some View {
-        GroupBox("Destination") {
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                GridRow {
-                    Text("Client IP")
-                    TextField("10.0.0.2", text: $settings.clientAddress)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 160)
-                    Text("Video port")
-                    TextField("", value: $settings.videoPort, format: .number.grouping(.never))
-                        .textFieldStyle(.roundedBorder).frame(width: 70)
-                    Text("Control")
-                    TextField("", value: $settings.controlPort, format: .number.grouping(.never))
-                        .textFieldStyle(.roundedBorder).frame(width: 70)
-                }
-            }
-            .padding(6)
-            .disabled(controller.isRunning)
-        }
-    }
-
-    private var sourceSection: some View {
-        GroupBox("Source") {
-            VStack(alignment: .leading, spacing: 10) {
-                Picker("", selection: $settings.source) {
-                    ForEach(StreamSettings.Source.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .disabled(controller.isRunning || !controller.virtualDisplaySupported)
-
-                if settings.source == .virtualDisplay {
-                    Label("A real second monitor, not a mirror. Arrange it in "
-                          + "System Settings ▸ Displays.",
-                          systemImage: "display.2")
-                        .font(.caption).foregroundStyle(.secondary)
-
-                    if !controller.virtualDisplaySupported {
-                        Label("No CGVirtualDisplay on this macOS. Use an HDMI dummy "
-                              + "plug and capture it as an existing display.",
-                              systemImage: "exclamationmark.triangle")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
-
-                    if controller.client.screenWidth > 0 {
-                        HStack {
-                            Text("Client reports \(controller.client.screenWidth)×\(controller.client.screenHeight)")
-                                .font(.caption).foregroundStyle(.secondary)
-                            Button("Match") {
-                                settings.width = controller.client.screenWidth
-                                settings.height = controller.client.screenHeight
-                            }
-                            .controlSize(.small)
-                            .disabled(controller.isRunning)
-                        }
-                    }
-                } else {
-                    Picker("Display", selection: $settings.displayID) {
-                        ForEach(controller.displays) { display in
-                            Text(display.label).tag(display.id)
-                        }
-                    }
-                    .disabled(controller.isRunning)
-                }
-
-                if !controller.activeSourceDescription.isEmpty {
-                    Text(controller.activeSourceDescription)
-                        .font(.caption.monospaced()).foregroundStyle(.green)
-                }
-            }
-            .padding(6)
-        }
-    }
-
-    private var videoSection: some View {
-        GroupBox("Video") {
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                GridRow {
-                    Text(settings.source == .virtualDisplay ? "Display size" : "Resolution")
-                    TextField("", value: $settings.width, format: .number.grouping(.never))
-                        .textFieldStyle(.roundedBorder).frame(width: 70)
-                    Text("×")
-                    TextField("", value: $settings.height, format: .number.grouping(.never))
-                        .textFieldStyle(.roundedBorder).frame(width: 70)
-                    Text("Frame rate")
-                    TextField("", value: $settings.frameRate, format: .number.grouping(.never))
-                        .textFieldStyle(.roundedBorder).frame(width: 60)
-                }
-                GridRow {
-                    Text("Bitrate")
-                    HStack {
-                        Slider(value: $settings.bitrateMbps, in: 5...80, step: 1)
-                        Text("\(Int(settings.bitrateMbps)) Mb/s").monospacedDigit().frame(width: 80)
-                    }
-                    .gridCellColumns(5)
-                }
-                GridRow {
-                    Text("Profile")
-                    Picker("", selection: $settings.profile) {
-                        ForEach(StreamSettings.Profile.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .labelsHidden().pickerStyle(.segmented).frame(width: 170)
-                    Text("Keyframe")
-                    HStack(spacing: 4) {
-                        TextField("", value: $settings.keyframeSeconds, format: .number)
-                            .textFieldStyle(.roundedBorder).frame(width: 50)
-                        Text("s")
-                    }
-                    .gridCellColumns(3)
-                }
-                GridRow {
-                    Text("")
-                    Toggle("Include mouse cursor", isOn: $settings.showsCursor)
-                        .gridCellColumns(5)
-                }
-            }
-            .padding(6)
-            .disabled(controller.isRunning)
-
-            if settings.height > 1080 {
-                Label("Above 1080p the 2010 iMac falls back to software decoding.",
-                      systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange).padding(.horizontal, 6)
-            }
-        }
-    }
-
-    /// Split out of the Network section because the type checker gave up on it
-    /// inline.
-    private var linkMTUNote: some View {
-        let mtu = controller.linkMTUBytes
-        let fits = controller.effectiveMTUPayload == settings.mtuPayload
-        let text = "Link MTU \(mtu) B — up to \(mtu - lsIPv4UDPOverhead) B per packet "
-            + "without IP fragmentation."
-        return Text(text)
-            .font(.caption)
-            .foregroundStyle(fits ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var networkSection: some View {
-        GroupBox("Network") {
-            VStack(alignment: .leading, spacing: 8) {
-                Picker("Packet size", selection: $settings.mtuPayload) {
-                    Text("1400 B — standard 1500 MTU").tag(Int(LS_DEFAULT_MTU_PAYLOAD))
-                    Text("8900 B — jumbo frames (MTU 9000 on both ends)").tag(Int(LS_JUMBO_MTU_PAYLOAD))
-                }
-                .disabled(controller.isRunning)
-
-                if controller.linkMTUBytes > 0 { linkMTUNote }
-
-                HStack {
-                    Button("Force keyframe") { controller.requestKeyframeNow() }
-                        .disabled(!controller.isRunning)
-                    if let path = controller.sdpPath {
-                        Button("Reveal test .sdp") {
-                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
-                        }
-                        Text("for VLC")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .padding(6)
-        }
-    }
-
-    private var powerSection: some View {
-        GroupBox("Power") {
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle("Wake the client on start, and when this Mac wakes",
-                       isOn: $settings.wakeClientAutomatically)
-                Toggle("Keep this Mac at full performance", isOn: $settings.preventAppNap)
-                    .help("Opts out of App Nap and timer coalescing, which otherwise "
-                          + "degrade the picture when you stop moving the cursor.")
-                if controller.isRunning {
-                    Text(controller.fullPerformanceHeld
-                         ? "Full performance asserted — macOS will not throttle this app"
-                         : "Not asserted — macOS may throttle this app when you stop typing")
-                        .font(.caption)
-                        .foregroundStyle(controller.fullPerformanceHeld ? .green : .orange)
-                }
-
-                Toggle("Stop streaming when this Mac sleeps", isOn: $settings.stopOnSleep)
-                    .help("Lets the iMac sleep too, rather than sitting lit up on a "
-                          + "frozen frame.")
-
-                HStack {
-                    Text("Client MAC")
-                    TextField("c4:2c:03:07:35:10", text: $settings.clientMACAddress)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-                        .frame(width: 180)
-                    Button("Wake now") { controller.wakeClient(reason: "Manual") }
-                        .disabled(settings.clientMACAddress.isEmpty)
-                }
-
-                Label("Learned when the client first connects. macOS hides hardware "
-                      + "addresses from apps, so to set it sooner run "
-                      + "`arp -n \(settings.clientAddress)` and paste the result.",
-                      systemImage: "info.circle")
-                    .font(.caption).foregroundStyle(.secondary)
-
-                Label("The iMac needs Energy Saver ▸ \"Wake for network access\".",
-                      systemImage: "bolt")
-                    .font(.caption).foregroundStyle(.secondary)
-
-                if !controller.wakeStatus.isEmpty {
-                    Text(controller.wakeStatus)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .padding(6)
-        }
-    }
-
-    private var statsSection: some View {
-        GroupBox("Live") {
-            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 6) {
-                GridRow {
-                    stat("Sending", String(format: "%.1f Mb/s", controller.outgoingMbps))
-                    stat("Encoded", String(format: "%.0f fps", controller.encodedFPS))
-                    stat("Capture → wire", String(format: "%.1f ms", controller.hostPipelineMilliseconds))
-                }
-                GridRow {
-                    stat("Client", controller.client.address)
-                    stat("RTT", controller.client.rttMilliseconds > 0
-                         ? String(format: "%.2f ms", controller.client.rttMilliseconds) : "—")
-                    stat("Keyframe requests", "\(controller.keyframeRequests)")
-                }
-                GridRow {
-                    stat("Client decode", controller.client.stats.decode_us > 0
-                         ? String(format: "%.2f ms", Double(controller.client.stats.decode_us) / 1000) : "—")
-                    stat("Client render", controller.client.stats.render_us > 0
-                         ? String(format: "%.2f ms", Double(controller.client.stats.render_us) / 1000) : "—")
-                    stat("Packets lost", "\(controller.client.stats.packets_lost)")
-                }
-                GridRow {
-                    stat("Frames decoded", "\(controller.client.stats.frames_decoded)")
-                    stat("Frames dropped", "\(controller.client.stats.frames_dropped)")
-                    stat("Frames corrupt", "\(controller.client.stats.frames_corrupt)")
-                }
-            }
-            .padding(6)
-
-            if controller.isRunning && controller.client.stats.decode_us > 0 {
-                Divider()
-                HStack {
-                    Text("Estimated glass-to-glass")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text(String(format: "≈ %.0f ms", latencyEstimate))
-                        .font(.system(.body, design: .monospaced).bold())
-                    Text("capture→wire + RTT/2 + decode + render")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 6).padding(.bottom, 4)
-            }
-        }
-    }
-
-    private var latencyEstimate: Double {
-        // Host side is measured directly. Network is half the round trip. The
-        // client reports its own decode and render times.
-        controller.hostPipelineMilliseconds
-            + controller.client.rttMilliseconds / 2.0
-            + Double(controller.client.stats.decode_us) / 1000.0
-            + Double(controller.client.stats.render_us) / 1000.0
-    }
-
-    private func stat(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.system(.body, design: .monospaced))
-        }
-        .frame(minWidth: 130, alignment: .leading)
-    }
-
-    private func errorBox(_ text: String) -> some View {
-        Label(text, systemImage: "xmark.octagon.fill")
-            .foregroundStyle(.red)
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func warningBox(_ items: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Encoder hints declined:")
-                .font(.caption).bold()
-            ForEach(items, id: \.self) { Text($0).font(.caption.monospaced()) }
-        }
-        .foregroundStyle(.orange)
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        settings?.makeKeyAndOrderFront(nil)
     }
 }

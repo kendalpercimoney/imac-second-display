@@ -34,6 +34,8 @@
     NSLock *_sendLock;
     uint8_t _localMAC[6];
     BOOL _haveLocalMAC;
+    /// How many times the control socket had to be replaced.
+    uint32_t _socketRestarts;
 }
 
 - (id)initWithHost:(NSString *)host port:(uint16_t)port {
@@ -50,6 +52,23 @@
 - (void)dealloc { [self stop]; }
 
 - (BOOL)start:(NSError **)error {
+    if (![self openSocket:error]) return NO;
+
+    [self discoverLocalMAC];
+
+    _running = YES;
+    _thread = [[NSThread alloc] initWithTarget:self selector:@selector(receiveLoop) object:nil];
+    [_thread setName:@"com.lanscreen.control"];
+    [_thread start];
+    return YES;
+}
+
+/// Creates and connects the socket. Split out so the receive loop can do it
+/// again: without the control channel there are no pings, so the app decides
+/// the host has gone and blanks the screen -- and then never hears it come
+/// back, because saying hello is what this socket is for.
+- (BOOL)openSocket:(NSError **)error {
+    if (_fd >= 0) { close(_fd); _fd = -1; }
     _fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (_fd < 0) {
         if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
@@ -83,12 +102,6 @@
         return NO;
     }
 
-    [self discoverLocalMAC];
-
-    _running = YES;
-    _thread = [[NSThread alloc] initWithTarget:self selector:@selector(receiveLoop) object:nil];
-    [_thread setName:@"com.lanscreen.control"];
-    [_thread start];
     return YES;
 }
 
@@ -195,7 +208,17 @@
 
 - (void)sendHelloWithWidth:(uint16_t)width height:(uint16_t)height videoPort:(uint16_t)videoPort {
     uint8_t buffer[LS_CTRL_MAX_SIZE];
-    size_t n = ls_ctrl_build_hello(buffer, sizeof(buffer), width, height, videoPort, 0,
+    // Tell the host what this build can do. A host that forwards the pointer to
+    // a client that cannot draw it would leave no pointer on screen anywhere,
+    // and one that sends audio to a client that cannot play it would be pouring
+    // 1.5 Mb/s into a socket nobody is listening to.
+    size_t n = ls_ctrl_build_hello(buffer, sizeof(buffer), width, height, videoPort,
+                                   (uint16_t)(LS_CLIENT_FLAG_DRAWS_CURSOR
+                                              | LS_CLIENT_FLAG_PLAYS_AUDIO
+                                              | (_canSetBrightness
+                                                 ? LS_CLIENT_FLAG_SETS_BRIGHTNESS : 0)
+                                              | (_canSendInput
+                                                 ? LS_CLIENT_FLAG_SENDS_INPUT : 0)),
                                    _haveLocalMAC ? _localMAC : NULL);
     [self sendBytes:buffer length:n];
 }
@@ -217,12 +240,15 @@
 }
 
 - (void)receiveLoop {
-    uint8_t buffer[LS_CTRL_MAX_SIZE * 4];
+    // Sized for the largest message rather than the common one: a cursor bitmap
+    // is 16 KB, everything else is a few dozen bytes.
+    uint8_t *buffer = (uint8_t *)malloc(LS_CTRL_MAX_PACKET);
+    if (!buffer) return;
     int consecutiveErrors = 0;
 
     while (_running) {
         @autoreleasepool {
-            ssize_t n = recv(_fd, buffer, sizeof(buffer), 0);
+            ssize_t n = recv(_fd, buffer, LS_CTRL_MAX_PACKET, 0);
             if (n <= 0) {
                 if (!_running) break;
                 int code = errno;
@@ -236,18 +262,24 @@
                 // UDP socket can surface transient errors that say nothing
                 // about its health, so only a socket that is genuinely gone is
                 // fatal; everything else is logged and retried.
-                if (code == EBADF || code == ENOTSOCK) {
-                    NSLog(@"[LanScreen] control socket closed (%s)", strerror(code));
-                    break;
-                }
                 consecutiveErrors++;
                 if (consecutiveErrors == 1 || consecutiveErrors % 50 == 0) {
                     NSLog(@"[LanScreen] control receive error, continuing (%s, %d in a row)",
                           strerror(code), consecutiveErrors);
                 }
-                if (consecutiveErrors > 500) {
-                    NSLog(@"[LanScreen] control socket is not recovering, giving up");
-                    break;
+                if (code == EBADF || code == ENOTSOCK || consecutiveErrors > 500) {
+                    _socketRestarts++;
+                    NSLog(@"[LanScreen] control socket is not working (%s); "
+                          @"reopening it (restart %u)", strerror(code), _socketRestarts);
+                    NSError *reopenError = nil;
+                    if (![self openSocket:&reopenError]) {
+                        NSLog(@"[LanScreen] could not reopen the control socket: %@; "
+                              @"retrying in a second", [reopenError localizedDescription]);
+                        usleep(1000000);
+                    } else {
+                        consecutiveErrors = 0;
+                    }
+                    continue;
                 }
                 usleep(2000);
                 continue;
@@ -268,6 +300,51 @@
                     [self sendBytes:reply length:len];
                     break;
                 }
+                case LS_MSG_CURSOR:
+                    _cursorMessagesReceived++;
+                    if (self.cursorMoved) {
+                        self.cursorMoved(message.cursor_x, message.cursor_y,
+                                         message.cursor_visible != 0,
+                                         message.cursor_image_id);
+                    }
+                    break;
+
+                case LS_MSG_CURSOR_IMAGE:
+                    if (self.cursorImageChanged) {
+                        NSData *rgba = [NSData dataWithBytes:(buffer + message.image_offset)
+                                                      length:message.image_length];
+                        self.cursorImageChanged(message.cursor_image_id,
+                                                message.image_width, message.image_height,
+                                                message.hotspot_x, message.hotspot_y, rgba);
+                    }
+                    break;
+
+                case LS_MSG_VOLUME:
+                    if (self.volumeChanged) {
+                        self.volumeChanged((float)message.volume / (float)LS_VOLUME_SCALE);
+                    }
+                    break;
+
+                case LS_MSG_AUDIO_DELAY:
+                    if (self.audioDelayChanged) {
+                        self.audioDelayChanged((int)message.audio_delay_ms);
+                    }
+                    break;
+
+                case LS_MSG_BRIGHTNESS:
+                    if (self.brightnessChanged) {
+                        self.brightnessChanged((float)message.brightness /
+                                               (float)LS_BRIGHTNESS_SCALE);
+                    }
+                    break;
+
+                case LS_MSG_INPUT_STATUS:
+                    if (self.inputStatusChanged) {
+                        self.inputStatusChanged(message.input_accepting != 0,
+                                                message.input_reason);
+                    }
+                    break;
+
                 case LS_MSG_BYE:
                     if (self.hostSaidGoodbye) self.hostSaidGoodbye();
                     break;
@@ -276,6 +353,8 @@
             }
         }
     }
+
+    free(buffer);
 }
 
 @end

@@ -21,10 +21,11 @@ import CoreVideo
 /// Hardware H.264 encoder tuned for "get this on the wire now", not for
 /// squeezing the last few percent out of the bitrate.
 ///
-/// The three settings that actually decide latency:
-///   - RealTime = true          : encoder must keep up with wall clock
+/// The settings that actually decide latency, and one that turned out to be
+/// the opposite of what its name suggests:
 ///   - AllowFrameReordering = false : no B-frames, so frame N never waits for N+1
-///   - MaxFrameDelayCount = 0   : encoder may not sit on frames to look ahead
+///   - RealTime = **false**     : see `Configuration.realTime`
+///   - MaxFrameDelayCount       : measured as doing nothing at all here
 /// Everything else is quality/bandwidth tuning.
 final class VideoEncoder {
 
@@ -44,6 +45,76 @@ final class VideoEncoder {
         /// demanding content -- zooming a photograph, say -- and shows up as
         /// blotchy blocks.
         var dataRateLimitMultiplier: Double? = 4.0
+        /// VideoToolbox's dedicated low-latency rate controller: one frame in,
+        /// one frame out, no look-ahead. Has to be requested when the session
+        /// is created, not set afterwards, and constrains which profiles and
+        /// properties are available.
+        ///
+        /// The app no longer turns this on. It was on by default for most of
+        /// this project's life and it was costing 5.4 ms of real latency.
+        ///
+        /// `Tests/EncoderLatency` says it is fast -- 9.4 ms of hold time
+        /// against 14.5 -- and that is where the belief came from. The
+        /// loopback harness, which times capture to decoded frame through the
+        /// actual pipeline, says the opposite and says it without ambiguity.
+        /// Four hundred frames, interleaved, three rounds, mean end to end:
+        ///
+        ///     420v, no low latency         8.04  8.07  8.04 ms
+        ///     BGRA, no low latency         8.76  8.70  8.82 ms
+        ///     420v + low latency          13.46 13.50 13.55 ms
+        ///     BGRA + low latency          14.15 14.27 14.39 ms
+        ///
+        /// No overlap in any statistic, including the minimum, which has no
+        /// noise in it: 5.1 ms against 11.2. Hold time measured on a batch fed
+        /// as fast as it will go is simply not the same quantity as latency,
+        /// and this is what it looks like when the two disagree.
+        ///
+        /// It also forces Constrained Baseline, undershoots the requested
+        /// bitrate by about 1%, and costs 0.2 dB of mean PSNR. The one thing
+        /// it genuinely wins is the single worst frame, 33.6 dB against 32.1.
+        var lowLatencyRateControl: Bool = false
+        /// Whether the encoder must keep up with the wall clock -- and the
+        /// other 5 ms, in the direction nobody would guess from the name.
+        ///
+        /// True does not make the encoder hurry. It appears to make
+        /// VideoToolbox *pace* delivery to the frame duration, and the
+        /// signature is unmistakable: with it on, the median hold (17.9 ms) is
+        /// higher than the mean (14.9 ms), which is what a queue being fed out
+        /// on a clock looks like rather than one being emptied.
+        ///
+        /// End to end through the loopback harness, interleaved, three rounds,
+        /// 4:2:0 in and no low-latency rate control either way:
+        ///
+        ///     real time off   7.96  8.13  8.13 ms   (min 5.21, p95 11.3-12.4)
+        ///     real time on   13.00 13.43 13.41 ms   (min 10.31, p95 16.9-17.4)
+        ///
+        /// Picture is unaffected -- 40.24 dB either way at 25 Mb/s on a 1080p
+        /// zoom, the same delivered bitrate, and the profile stays Baseline.
+        ///
+        /// This only shows up with the low-latency rate controller off. With
+        /// it on, that rate controller is in charge and this makes no
+        /// difference at all, which is why measuring the two together for so
+        /// long hid both of them.
+        ///
+        /// The risk it buys, and it is a real one: an encoder that is not
+        /// promising to keep up with the wall clock is allowed not to, under
+        /// load. It kept up throughout, on a machine sitting at load average
+        /// 5.8, delivering every frame at the full requested bitrate.
+        var realTime: Bool = false
+        /// How many frames the encoder may sit on before it has to produce
+        /// output. 0 means "hold nothing"; the Apple Silicon encoder rejects
+        /// that outright, so 1 is the practical floor.
+        ///
+        /// Measured as doing nothing whatsoever in either direction: 4 with
+        /// `realTime: true` gives 14.98 ms of hold, exactly the 14.93 ms of 0,
+        /// and 4 with it false gives 9.08 against 9.10. This encoder has no
+        /// look-ahead to ask for. Kept parameterised because that is how it
+        /// was established, and because it is the obvious thing to try again.
+        var maxFrameDelayCount: Int = 0
+        /// What to tell the encoder about the frame rate, when that differs
+        /// from the rate we actually feed it. Claimed to affect how long the
+        /// encoder is willing to hold a frame.
+        var expectedFrameRateOverride: Int? = nil
     }
 
     private var session: VTCompressionSession?
@@ -62,9 +133,12 @@ final class VideoEncoder {
     deinit { stop() }
 
     func start() throws {
-        let encoderSpec: [CFString: Any] = [
+        var encoderSpec: [CFString: Any] = [
             kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true
         ]
+        if config.lowLatencyRateControl, #available(macOS 11.0, *) {
+            encoderSpec[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = true
+        }
 
         var created: VTCompressionSession?
         let status = VTCompressionSessionCreate(
@@ -88,20 +162,34 @@ final class VideoEncoder {
         }
         self.session = session
 
-        set(session, kVTCompressionPropertyKey_RealTime, true)
+        set(session, kVTCompressionPropertyKey_RealTime, config.realTime)
+        // Never, in either mode. B-frames arrive in decode order and the client
+        // decodes synchronously and draws whatever comes out, so it has no way
+        // to put them back into display order -- the picture would simply play
+        // slightly wrong. Reordering is the one quality lever Video mode does
+        // not get to pull.
         set(session, kVTCompressionPropertyKey_AllowFrameReordering, false)
         // 0 means "hold nothing". The Apple Silicon encoder rejects it outright
-        // (kVTPropertyNotSupportedErr), so try 1 as well before giving up --
+        // (kVTPropertyNotSupportedErr), so fall back a step before giving up --
         // on encoders that do honour it, this is worth a whole frame.
-        if !trySet(session, kVTCompressionPropertyKey_MaxFrameDelayCount, 0) {
+        if !trySet(session, kVTCompressionPropertyKey_MaxFrameDelayCount,
+                   config.maxFrameDelayCount), config.maxFrameDelayCount != 1 {
             _ = trySet(session, kVTCompressionPropertyKey_MaxFrameDelayCount, 1)
         }
         if config.prioritizeSpeed, #available(macOS 14.0, *) {
             set(session, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, true)
         }
-        set(session, kVTCompressionPropertyKey_ProfileLevel,
-            config.profileIsBaseline ? kVTProfileLevel_H264_Baseline_AutoLevel
-                                     : kVTProfileLevel_H264_Main_AutoLevel)
+        // The low-latency rate controller only accepts Constrained Baseline for
+        // H.264, which is a subset of the Baseline the iMac already decodes.
+        let profile: CFString
+        if config.lowLatencyRateControl {
+            profile = kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel
+        } else if config.profileIsBaseline {
+            profile = kVTProfileLevel_H264_Baseline_AutoLevel
+        } else {
+            profile = kVTProfileLevel_H264_Main_AutoLevel
+        }
+        set(session, kVTCompressionPropertyKey_ProfileLevel, profile)
         if !config.profileIsBaseline {
             // CAVLC over CABAC: a few percent more bits, noticeably less work
             // for a 2010-era decoder.
@@ -109,7 +197,8 @@ final class VideoEncoder {
                 kVTH264EntropyMode_CAVLC)
         }
         set(session, kVTCompressionPropertyKey_AverageBitRate, config.bitrate)
-        set(session, kVTCompressionPropertyKey_ExpectedFrameRate, config.frameRate)
+        set(session, kVTCompressionPropertyKey_ExpectedFrameRate,
+            config.expectedFrameRateOverride ?? config.frameRate)
         set(session, kVTCompressionPropertyKey_MaxKeyFrameInterval,
             config.frameRate * Int(config.keyframeInterval.rounded()))
         set(session, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,

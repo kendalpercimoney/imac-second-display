@@ -33,6 +33,15 @@ final class ControlChannel {
         /// Reported by the client so we can wake it later, or "" if it could
         /// not determine its own hardware address.
         var macAddress: String = ""
+        /// Whether the client told us it can draw the pointer itself.
+        var drawsCursor = false
+        /// Whether the client told us it can play the audio stream.
+        var playsAudio = false
+        /// Whether the client's display took a brightness reading.
+        var setsBrightness = false
+        /// Whether the client can forward its own keyboard and mouse.
+        var sendsInput = false
+        var hasSaidHello = false
         var lastSeen: Date?
         var rttMilliseconds: Double = 0
         var stats = ls_stats()
@@ -43,6 +52,14 @@ final class ControlChannel {
     private var pingTimer: DispatchSourceTimer?
     private let lock = NSLock()
     private var clientAddress: sockaddr_in?
+    /// The IP that last said HELLO, which is the only one whose input is acted
+    /// on. `clientAddress` follows whoever spoke last, which is right for
+    /// knowing where to send pings and wrong for deciding who may type on this
+    /// Mac: any machine on the network can send a well-formed datagram to this
+    /// port. Compared by IP alone, because the client's source port changes
+    /// whenever it has to replace its socket, and it does not say hello again
+    /// mid-stream when it does.
+    private var helloIP: in_addr_t?
     private var running = false
 
     /// Fired on the receive thread. Keep the handler cheap.
@@ -53,6 +70,9 @@ final class ControlChannel {
     var onClientMAC: ((String) -> Void)?
     /// Fired on the main queue whenever client state changes.
     var onStateChanged: ((ClientState) -> Void)?
+    /// Fired on the receive thread for every input message from the client that
+    /// said HELLO, and for no one else.
+    var onInput: ((ls_ctrl_message) -> Void)?
 
     private var state = ClientState()
 
@@ -87,7 +107,7 @@ final class ControlChannel {
         }
         socket?.shutdownAndClose()
         socket = nil
-        lock.lock(); clientAddress = nil; lock.unlock()
+        lock.lock(); clientAddress = nil; helloIP = nil; lock.unlock()
     }
 
     private func currentClientAddress() -> sockaddr_in? {
@@ -172,6 +192,12 @@ final class ControlChannel {
             lock.lock()
             state.screenWidth = Int(message.screen_width)
             state.screenHeight = Int(message.screen_height)
+            state.drawsCursor = (message.flags & UInt16(LS_CLIENT_FLAG_DRAWS_CURSOR)) != 0
+            state.playsAudio = (message.flags & UInt16(LS_CLIENT_FLAG_PLAYS_AUDIO)) != 0
+            state.setsBrightness = (message.flags & UInt16(LS_CLIENT_FLAG_SETS_BRIGHTNESS)) != 0
+            state.sendsInput = (message.flags & UInt16(LS_CLIENT_FLAG_SENDS_INPUT)) != 0
+            state.hasSaidHello = true
+            helloIP = from.sin_addr.s_addr
             if !reportedMAC.isEmpty { state.macAddress = reportedMAC }
             lock.unlock()
             onClientHello?()
@@ -200,9 +226,17 @@ final class ControlChannel {
             }
             publishState()
 
+        case LS_MSG_INPUT_MOVE, LS_MSG_INPUT_BUTTON, LS_MSG_INPUT_SCROLL,
+             LS_MSG_INPUT_KEY, LS_MSG_INPUT_FLAGS, LS_MSG_INPUT_STATE:
+            lock.lock()
+            let trusted = helloIP != nil && helloIP == from.sin_addr.s_addr
+            lock.unlock()
+            if trusted { onInput?(message) }
+
         case LS_MSG_BYE:
             lock.lock()
             clientAddress = nil
+            helloIP = nil
             state.lastSeen = nil
             lock.unlock()
             publishState()
@@ -210,6 +244,14 @@ final class ControlChannel {
         default:
             break
         }
+    }
+
+    /// Sends a prebuilt message to whatever address the client last spoke from.
+    /// Silently does nothing before the client has said hello, which is correct:
+    /// there is nowhere to send it yet.
+    func send(_ bytes: [UInt8], count: Int) {
+        guard let sock = socket, let addr = currentClientAddress(), count > 0 else { return }
+        sock.send(bytes, count, to: addr)
     }
 
     private func sendPing() {

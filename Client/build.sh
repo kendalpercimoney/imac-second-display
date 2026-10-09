@@ -130,9 +130,14 @@ SOURCES=(
     "$ROOT/Client/src/LSGLView.m"
     "$ROOT/Client/src/LSReceiver.m"
     "$ROOT/Client/src/LSDecoder.m"
+    "$ROOT/Client/src/LSDecodeQueue.m"
     "$ROOT/Client/src/LSDepacketizer.m"
     "$ROOT/Client/src/LSControlClient.m"
     "$ROOT/Client/src/LSPowerManager.m"
+    "$ROOT/Client/src/LSAudioPlayer.m"
+    "$ROOT/Client/src/LSAudioReceiver.m"
+    "$ROOT/Client/src/LSBrightness.m"
+    "$ROOT/Client/src/LSInputForwarder.m"
 )
 
 # -fobjc-arc is fine on 10.9; weak references need 10.7+ and we are well past.
@@ -157,6 +162,7 @@ SOURCES=(
     -framework ImageIO \
     -framework CoreServices \
     -framework IOKit \
+    -framework AudioToolbox \
     "${SOURCES[@]}" \
     -o "$APP/Contents/MacOS/LanScreenClient"
 

@@ -51,7 +51,7 @@ let controls: [Control] = [
     Control(name: "Display size (height)") { $0.height = $0.height == 1080 ? 720 : 1080 },
     Control(name: "Frame rate")            { $0.frameRate = $0.frameRate == 60 ? 30 : 60 },
     Control(name: "Bitrate")               { $0.bitrateMbps = $0.bitrateMbps == 25 ? 40 : 25 },
-    Control(name: "Profile")               { $0.profile = $0.profile == .baseline ? .main : .baseline },
+    Control(name: "Profile")               { $0.profile = $0.profile == .baseline ? .high : .baseline },
     Control(name: "Keyframe")              { $0.keyframeSeconds = $0.keyframeSeconds == 5 ? 2 : 5 },
     Control(name: "Include mouse cursor")  { $0.showsCursor.toggle() },
     Control(name: "Packet size")           { $0.mtuPayload = $0.mtuPayload == 1400 ? 8900 : 1400 },
@@ -108,7 +108,7 @@ sweep("every control, with video mode and the separate pointer on") { settings i
     settings.captureYUV420 = true
     settings.forwardCursor = true
     settings.showsCursor = true
-    settings.profile = .main
+    settings.profile = .high
     settings.mtuPayload = 1400
 }
 
@@ -119,13 +119,22 @@ print("==> the overrides are reported when they apply, and only then")
 
 do {
     // What the low-latency rate controller used to break. Nothing overrides
-    // the picker now, so asking for Main must get Main.
+    // the picker now, so asking for High must get High.
     let s = StreamSettings()
-    s.profile = .main
+    s.profile = .high
     let p = plan(s)
     check("the Profile picker is no longer overridden", p.overrideFor("Profile") == nil)
     check("...and is no longer inert either", p.inertFor("Profile") == nil)
-    check("...and the plan really is Main", p.profile == .main, "\(p.profile.rawValue)")
+    check("...and the plan really is High", p.profile == .high, "\(p.profile.rawValue)")
+}
+do {
+    // "Main" was an option that turned out to be identical to Baseline. Whoever
+    // picked it wanted the better picture.
+    check("a saved \"Main\" comes back as High",
+          StreamSettings.Profile(saved: "Main") == .high)
+    check("...and the others come back as themselves",
+          StreamSettings.Profile(saved: "Baseline") == .baseline
+          && StreamSettings.Profile(saved: "High") == .high)
 }
 do {
     let s = StreamSettings()

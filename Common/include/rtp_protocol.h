@@ -281,6 +281,13 @@ typedef struct {
  * an older client that sends nothing at all must not read as the second. */
 #define LS_DECODER_KNOWN     0x0001u
 #define LS_DECODER_HARDWARE  0x0002u
+/* The client measured its own YCbCr-to-RGB conversion against BT.709... */
+#define LS_DECODER_COLOUR_CHECKED 0x0004u
+/* ...found the built-in one wrong, and converts with a shader instead. */
+#define LS_DECODER_COLOUR_SHADER  0x0008u
+/* Bits 8-15: the worst channel error measured on the conversion in use, in
+ * code values. Only meaningful with LS_DECODER_COLOUR_CHECKED. */
+#define LS_DECODER_COLOUR_ERROR_SHIFT 8
 
 typedef struct {
     uint8_t  type;              /* one of LS_MSG_*                            */

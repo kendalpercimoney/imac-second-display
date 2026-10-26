@@ -63,6 +63,10 @@
 /// Host points per point of this view, from the last frame drawn: how much a
 /// movement of the iMac's own mouse is scaled by on its way to the host.
 @property (nonatomic, readonly) double hostPointsPerViewPoint;
+/// What the colour check found, as LS_DECODER_COLOUR_* bits for the host:
+/// whether it ran, whether the BT.709 shader is in use, and the worst channel
+/// error measured on the conversion in use. Zero until the first frame.
+- (uint32_t)colourFlags;
 
 /// The longest a single pointer update has taken to hand over.
 ///

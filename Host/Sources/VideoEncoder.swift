@@ -29,12 +29,31 @@ import CoreVideo
 /// Everything else is quality/bandwidth tuning.
 final class VideoEncoder {
 
+    /// Which H.264 profile, and with it which entropy coder.
+    ///
+    /// High with CABAC keeps measurably more detail at the same bitrate than
+    /// Baseline: on a 1080p zoom, 41.32 dB mean against 40.22 at 25 Mb/s and
+    /// 43.51 against 42.83 at 49, and a better worst frame at both -- worth
+    /// roughly a quarter more bitrate, for nothing. Almost all of it is CABAC;
+    /// High's 8x8 transform on its own (High with CAVLC) is worth a fraction.
+    ///
+    /// There used to be a Main option here, with CABAC switched off on the
+    /// theory that CABAC costs a 2010 decoder too much. Main without CABAC
+    /// turned out to be bit-for-bit as good as Baseline -- 40.22 dB and 42.83
+    /// exactly -- because CABAC is the one thing Main would have added, so the
+    /// option never did anything. And that iMac decodes H.264 in hardware,
+    /// where CABAC costs nothing; the client reports whether it actually does.
+    enum Profile: Equatable {
+        case baseline
+        case high
+    }
+
     struct Configuration {
         var width: Int
         var height: Int
         var frameRate: Int
         var bitrate: Int
-        var profileIsBaseline: Bool
+        var profile: Profile
         var keyframeInterval: Double
         /// Trade picture quality for encoder speed. Measured as no help to
         /// latency on Apple Silicon and a real cost to quality on detailed,
@@ -115,11 +134,31 @@ final class VideoEncoder {
         /// from the rate we actually feed it. Claimed to affect how long the
         /// encoder is willing to hold a frame.
         var expectedFrameRateOverride: Int? = nil
+        /// Constant quality, 0 to 1, in place of a bitrate. Only the still
+        /// encoder uses it: a picture that has stopped changing can be sent
+        /// once at whatever size it takes to be right. 1.0 itself is refused --
+        /// the encoder silently produces nothing -- so stay below it.
+        var quality: Double? = nil
+        /// An explicit profile and level, in place of letting the encoder pick
+        /// the level from the bitrate. The still encoder has to match the level
+        /// of the stream it is joining, or its keyframe carries different
+        /// parameter sets and the client has to rebuild its decoder.
+        var profileLevel: CFString? = nil
     }
 
     private var session: VTCompressionSession?
-    private let config: Configuration
+    let config: Configuration
     private let onEncodedFrame: (CMSampleBuffer) -> Void
+
+    /// profile_idc and level_idc from the parameter sets this encoder actually
+    /// produced, once it has produced any. Written on VideoToolbox's output
+    /// thread; read after `completeFrames()`, hence the lock.
+    private let levelLock = NSLock()
+    private var producedLevel: (profileIDC: UInt8, levelIDC: UInt8)?
+    var streamLevel: (profileIDC: UInt8, levelIDC: UInt8)? {
+        levelLock.lock(); defer { levelLock.unlock() }
+        return producedLevel
+    }
 
     /// Non-fatal property failures are collected here rather than thrown; a
     /// hardware encoder that refuses one hint is still better than no stream.
@@ -181,22 +220,33 @@ final class VideoEncoder {
         }
         // The low-latency rate controller only accepts Constrained Baseline for
         // H.264, which is a subset of the Baseline the iMac already decodes.
-        let profile: CFString
-        if config.lowLatencyRateControl {
-            profile = kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel
-        } else if config.profileIsBaseline {
-            profile = kVTProfileLevel_H264_Baseline_AutoLevel
+        let profileLevel: CFString
+        if let explicit = config.profileLevel {
+            profileLevel = explicit
+        } else if config.lowLatencyRateControl {
+            profileLevel = kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel
+        } else if config.profile == .high {
+            profileLevel = kVTProfileLevel_H264_High_AutoLevel
         } else {
-            profile = kVTProfileLevel_H264_Main_AutoLevel
+            profileLevel = kVTProfileLevel_H264_Baseline_AutoLevel
         }
-        set(session, kVTCompressionPropertyKey_ProfileLevel, profile)
-        if !config.profileIsBaseline {
-            // CAVLC over CABAC: a few percent more bits, noticeably less work
-            // for a 2010-era decoder.
-            set(session, kVTCompressionPropertyKey_H264EntropyMode,
-                kVTH264EntropyMode_CAVLC)
+        set(session, kVTCompressionPropertyKey_ProfileLevel, profileLevel)
+        if config.profile == .high {
+            set(session, kVTCompressionPropertyKey_H264EntropyMode, kVTH264EntropyMode_CABAC)
         }
-        set(session, kVTCompressionPropertyKey_AverageBitRate, config.bitrate)
+        if let quality = config.quality {
+            set(session, kVTCompressionPropertyKey_Quality, quality)
+        } else {
+            set(session, kVTCompressionPropertyKey_AverageBitRate, config.bitrate)
+        }
+        // Say what the stream is. Until now it carried no colour information
+        // at all, so every decoder had to guess, and a 2010 iMac's guess is the
+        // standard-definition matrix. Primaries and matrix are BT.709, which is
+        // what sRGB content captured with BT.709 is; the transfer is sRGB's own
+        // curve, which is what the pixels were captured in; range is video.
+        set(session, kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2)
+        set(session, kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_sRGB)
+        set(session, kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         set(session, kVTCompressionPropertyKey_ExpectedFrameRate,
             config.expectedFrameRateOverride ?? config.frameRate)
         set(session, kVTCompressionPropertyKey_MaxKeyFrameInterval,
@@ -206,8 +256,10 @@ final class VideoEncoder {
         set(session, kVTCompressionPropertyKey_MaximizePowerEfficiency, false)
 
         // Cap on burstiness, so a keyframe cannot dump a megabyte into the NIC
-        // in one go and overrun the client's receive buffer.
-        if let multiplier = config.dataRateLimitMultiplier {
+        // in one go and overrun the client's receive buffer. Not for the still
+        // encoder, whose single frame is meant to be large: about a megabyte
+        // at 1080p, well inside the client's 4 MB receive buffer.
+        if config.quality == nil, let multiplier = config.dataRateLimitMultiplier {
             let byteCap = NSNumber(value: Double(config.bitrate) / 8.0 * multiplier)
             set(session, kVTCompressionPropertyKey_DataRateLimits,
                 [byteCap, NSNumber(value: 1.0)] as CFArray)
@@ -263,7 +315,76 @@ final class VideoEncoder {
     }
 
     fileprivate func deliver(_ sampleBuffer: CMSampleBuffer) {
+        if let format = CMSampleBufferGetFormatDescription(sampleBuffer) {
+            var sps: UnsafePointer<UInt8>?
+            var size = 0
+            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    format, parameterSetIndex: 0, parameterSetPointerOut: &sps,
+                    parameterSetSizeOut: &size, parameterSetCountOut: nil,
+                    nalUnitHeaderLengthOut: nil) == noErr, let sps, size > 3 {
+                levelLock.lock()
+                producedLevel = (sps[1], sps[3])
+                levelLock.unlock()
+            }
+        }
         onEncodedFrame(sampleBuffer)
+    }
+
+    /// Waits for every frame handed to this encoder to come out of it. Once
+    /// this returns no further output callback is running or will run for what
+    /// was submitted -- which is what lets a second encoder write into the same
+    /// packetizer straight afterwards without the two interleaving.
+    func completeFrames() {
+        guard let session else { return }
+        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+    }
+
+    /// The explicit profile-and-level constant for parameter sets that say
+    /// `profileIDC` and `levelIDC`, or nil if there is no such constant.
+    static func explicitProfileLevel(profileIDC: UInt8, levelIDC: UInt8) -> CFString? {
+        switch (profileIDC, levelIDC) {
+        case (66, 30): return kVTProfileLevel_H264_Baseline_3_0
+        case (66, 31): return kVTProfileLevel_H264_Baseline_3_1
+        case (66, 32): return kVTProfileLevel_H264_Baseline_3_2
+        case (66, 40): return kVTProfileLevel_H264_Baseline_4_0
+        case (66, 41): return kVTProfileLevel_H264_Baseline_4_1
+        case (66, 42): return kVTProfileLevel_H264_Baseline_4_2
+        case (66, 50): return kVTProfileLevel_H264_Baseline_5_0
+        case (66, 51): return kVTProfileLevel_H264_Baseline_5_1
+        case (66, 52): return kVTProfileLevel_H264_Baseline_5_2
+        case (100, 30): return kVTProfileLevel_H264_High_3_0
+        case (100, 31): return kVTProfileLevel_H264_High_3_1
+        case (100, 32): return kVTProfileLevel_H264_High_3_2
+        case (100, 40): return kVTProfileLevel_H264_High_4_0
+        case (100, 41): return kVTProfileLevel_H264_High_4_1
+        case (100, 42): return kVTProfileLevel_H264_High_4_2
+        case (100, 50): return kVTProfileLevel_H264_High_5_0
+        case (100, 51): return kVTProfileLevel_H264_High_5_1
+        case (100, 52): return kVTProfileLevel_H264_High_5_2
+        default: return nil
+        }
+    }
+
+    /// Quality for the still encoder. 0.97 measured at 50.5 dB on a 1080p
+    /// zoom for about a megabyte; 0.95 is 49.5 dB for 0.9 MB, 0.99 is 51.3 dB
+    /// for 1.2 MB. Past 50 dB nobody can see a difference, and 1.0 itself is
+    /// refused outright.
+    static let stillQuality = 0.97
+}
+
+extension VideoEncoder.Configuration {
+    /// The same stream, encoded once at constant quality: what a still picture
+    /// is refreshed with. Matched to the level the motion encoder actually
+    /// chose, so its keyframe carries identical parameter sets.
+    func forStill(matching level: (profileIDC: UInt8, levelIDC: UInt8)?) -> Self {
+        var still = self
+        still.quality = VideoEncoder.stillQuality
+        still.lowLatencyRateControl = false
+        if let level {
+            still.profileLevel = VideoEncoder.explicitProfileLevel(
+                profileIDC: level.profileIDC, levelIDC: level.levelIDC)
+        }
+        return still
     }
 }
 

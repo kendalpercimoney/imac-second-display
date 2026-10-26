@@ -36,17 +36,20 @@ struct StreamPlan: Equatable {
 
     /// The highest bitrate that still fits H.264 Level 4.2, which 1080p at 60
     /// fps already needs. Above it VideoToolbox's AutoLevel moves the stream to
-    /// Level 5.0 -- measured on this encoder as 4.2 at 50 Mb/s and 5.0 at 55,
-    /// matching the spec's 50 Mb/s ceiling for Baseline and Main at 4.2.
+    /// Level 5.0. Measured on this encoder at 1080p60: Baseline is 4.2 up to
+    /// 50 Mb/s and 5.0 at 55; High is 4.2 up to 62 and 5.0 at 63 -- the spec's
+    /// ceilings, since High is allowed 1.25 times Baseline's bitrate.
     ///
     /// It matters because a level is a promise about how hard the stream is to
     /// decode, and a hardware decoder that does not support a level does not
     /// refuse the stream. It is decoded in software instead, silently.
-    static let level42MaxBitsPerSecond = 50_000_000
+    static func level42MaxBitsPerSecond(_ profile: Profile) -> Int {
+        profile == .high ? 62_500_000 : 50_000_000
+    }
 
     enum Profile: String, Equatable {
         case baseline = "Baseline"
-        case main = "Main"
+        case high = "High"
     }
 
     /// A control the plan did not honour, and why.
@@ -174,7 +177,7 @@ struct StreamPlan: Equatable {
             capturesCursor = settings.showsCursor
         }
 
-        profile = settings.profile == .baseline ? .baseline : .main
+        profile = settings.profile == .baseline ? .baseline : .high
 
         // Exactly one of the two bitrates is in use at a time, so the other
         // one is a control that cannot do anything and says so.

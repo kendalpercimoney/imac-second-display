@@ -162,7 +162,7 @@ func trial(_ label: String, bitrate: Int, keyframeInterval: Double,
 
     let encoder = VideoEncoder(config: .init(
         width: width, height: height, frameRate: fps, bitrate: bitrate,
-        profileIsBaseline: true, keyframeInterval: keyframeInterval,
+        profile: .baseline, keyframeInterval: keyframeInterval,
         prioritizeSpeed: prioritizeSpeed,
         dataRateLimitMultiplier: dataRateLimitMultiplier,
         lowLatencyRateControl: lowLatency,

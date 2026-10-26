@@ -77,7 +77,7 @@ func measure(label: String, forceKeyframeEveryFrame: Bool, frames: Int, fps: Int
     let encoder = VideoEncoder(config: .init(width: width, height: height,
                                              frameRate: fps,
                                              bitrate: 25_000_000,
-                                             profileIsBaseline: true,
+                                             profile: .baseline,
                                              keyframeInterval: keyframeInterval)) { sampleBuffer in
         if let block = CMSampleBufferGetDataBuffer(sampleBuffer) {
             total += CMBlockBufferGetDataLength(block)

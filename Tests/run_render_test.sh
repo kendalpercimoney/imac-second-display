@@ -22,8 +22,10 @@
 # came out the colours they went in as. That exercises the one path the
 # headless loopback test cannot reach: IOSurface -> GL_YCBCR_422_APPLE -> RGB.
 #
-# A wrong colour matrix, a video-range mismatch, or a flipped image all fail
-# here rather than surprising you once the code is on a machine in another room.
+# A video-range mismatch or a flipped image fails here rather than surprising
+# you once the code is on a machine in another room. A wrong colour matrix does
+# not: pure primaries clip at 0 and 255 whichever matrix is used, and the
+# tolerance is +/-40. Tests/run_colour_test.sh is what checks the matrix.
 #
 # This opens a window for a couple of seconds.
 #

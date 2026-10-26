@@ -39,9 +39,25 @@ func convertTo420v(_ source: CVPixelBuffer) -> CVPixelBuffer {
                         [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary,
                         &destination)
     guard let destination else { return source }
+    // BT.709, said explicitly, because that is what the host's capture uses:
+    // ScreenCaptureKit converts with it and tags its buffers ITU_R_709_2. Left
+    // to its default, this converter could quietly use a different matrix and
+    // the colour test would be checking a pipeline the host does not have.
+    VTSessionSetProperty(transfer, key: kVTPixelTransferPropertyKey_DestinationYCbCrMatrix,
+                         value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
     VTPixelTransferSessionTransferImage(transfer, from: source, to: destination)
     return destination
 }
+
+/// Flat mid-tone patches in a 4x3 grid. Saturated primaries hide a colour
+/// matrix error -- they clip at 0 and 255 whichever matrix is used -- so these
+/// are the colours a mismatch actually moves: skin, foliage, sky, greys.
+/// Tests/checkcolours.m holds the same table and checks each one.
+let colourPatches: [(r: UInt8, g: UInt8, b: UInt8)] = [
+    (200, 120,  80), ( 80, 160,  80), ( 90, 150, 210), (128, 128, 128),
+    ( 30,  30,  30), (230, 230, 230), (200,  40,  40), ( 40, 160, 160),
+    (220, 200,  60), (120,  60, 160), (230, 140,  40), (110,  80,  50),
+]
 
 let arguments = CommandLine.arguments
 let host = arguments.count > 1 ? arguments[1] : "127.0.0.1"
@@ -77,6 +93,20 @@ func makeFrame(_ index: Int) -> CVPixelBuffer {
     CVPixelBufferLockBaseAddress(pixelBuffer, [])
     let stride = CVPixelBufferGetBytesPerRow(pixelBuffer)
     let base = CVPixelBufferGetBaseAddress(pixelBuffer)!.assumingMemoryBound(to: UInt8.self)
+
+    if pattern == "patches" {
+        for y in 0..<height {
+            let row = base + y * stride
+            let patchRow = min(y * 3 / height, 2)
+            for x in 0..<width {
+                let c = colourPatches[patchRow * 4 + min(x * 4 / width, 3)]
+                let p = row + x * 4
+                p[0] = c.b; p[1] = c.g; p[2] = c.r; p[3] = 255
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+        return pixelBuffer
+    }
 
     if pattern == "bars" {
         // Four flat quadrants. Flat so chroma subsampling cannot blur them,
@@ -134,7 +164,7 @@ let done = DispatchSemaphore(value: 0)
 let encoder = VideoEncoder(config: .init(width: width, height: height,
                                          frameRate: fps,
                                          bitrate: 12_000_000,
-                                         profileIsBaseline: true,
+                                         profile: .baseline,
                                          keyframeInterval: 1.0,
                                          lowLatencyRateControl: useLowLatency)) { sampleBuffer in
     packetizer.packetize(sampleBuffer: sampleBuffer)

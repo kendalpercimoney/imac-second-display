@@ -84,6 +84,14 @@ final class StreamController: ObservableObject {
     /// Turns the iMac's keyboard and mouse into events here. Its own lock makes
     /// it safe to call from the control thread and the encode queue alike.
     private var injector: InputInjector?
+    /// Sends a still picture once more at near-lossless quality. Created on
+    /// first use, to match whatever level the motion encoder settled on, and
+    /// replaced when the motion encoder is.
+    private var stillEncoder: VideoEncoder?
+    /// When that is due, and the keyframe it obliges afterwards. Touched from
+    /// VideoToolbox's output thread and the encode queue.
+    private var refinement = StillRefinement()
+    private let refinementLock = NSLock()
     /// Whether input from the client is acted on right now: switched on, and
     /// permitted. Refreshed with the settings push every two seconds, and read
     /// on the control thread for every input message, hence the lock.
@@ -484,6 +492,12 @@ final class StreamController: ObservableObject {
         }
         try control.start(port: UInt16(settings.controlPort))
 
+        // Refreshing still pictures is on unless switched off with
+        //   defaults write com.lanscreen.host ls.refineStill -bool false
+        // -- not a control in the window, because there is no reason to want it
+        // off short of something going wrong with it.
+        resetRefinement(enabled: UserDefaults.standard.object(forKey: "ls.refineStill") as? Bool ?? true)
+
         let encoder = makeEncoder(for: plan)
         try encoder.start()
         let encoderWarnings = encoder.warnings
@@ -572,13 +586,30 @@ final class StreamController: ObservableObject {
             height: plan.height,
             frameRate: plan.frameRate,
             bitrate: plan.bitrateBitsPerSecond,
-            profileIsBaseline: plan.profile != .main,
+            profile: plan.profile == .high ? .high : .baseline,
             keyframeInterval: plan.keyframeSeconds)
+        return makeEncoder(config: config, isMotion: true)
+    }
+
+    /// `isMotion` is false for the still encoder, whose one large keyframe
+    /// must not count as the kind of change that earns another refresh.
+    private func makeEncoder(config: VideoEncoder.Configuration,
+                             isMotion: Bool) -> VideoEncoder {
         return VideoEncoder(config: config) { [weak self] sampleBuffer in
             // VideoToolbox serializes output callbacks per session, so the
-            // packetizer is only ever entered by one thread at a time.
+            // packetizer is only ever entered by one thread at a time. The
+            // still encoder only ever runs while the motion one has nothing
+            // pending, and is waited for before anything else is encoded.
             guard let self, let packetizer = self.packetizer else { return }
             packetizer.packetize(sampleBuffer: sampleBuffer)
+
+            if isMotion, let block = CMSampleBufferGetDataBuffer(sampleBuffer) {
+                let bytes = CMBlockBufferGetDataLength(block)
+                let key = RTPPacketizer.isKeyframe(sampleBuffer)
+                self.refinementLock.lock()
+                self.refinement.motionFrameEncoded(bytes: bytes, isKeyframe: key)
+                self.refinementLock.unlock()
+            }
 
             // Measured against the same clock the frame was stamped with, so
             // this is capture-to-wire for real, not an estimate.
@@ -655,6 +686,8 @@ final class StreamController: ObservableObject {
             // immediately afterwards.
             self.encoder?.stop()
             self.encoder = nil
+            self.stillEncoder?.stop()
+            self.stillEncoder = nil
             self.packetizer = nil
             self.sender = nil
             self.control = nil
@@ -676,7 +709,10 @@ final class StreamController: ObservableObject {
         encodeQueue.async {
             guard let encoder = self.encoder else { return }
 
-            let force = self.forceKeyframeFlag
+            self.refinementLock.lock()
+            let afterRefresh = self.refinement.frameCaptured(at: ProcessInfo.processInfo.systemUptime)
+            self.refinementLock.unlock()
+            let force = self.forceKeyframeFlag || afterRefresh
             self.forceKeyframeFlag = false
 
             let start = CFAbsoluteTimeGetCurrent()
@@ -833,6 +869,12 @@ final class StreamController: ObservableObject {
                 return
             }
             self.encoder = replacement
+            // The still encoder was matched to the old one's level, which a new
+            // bitrate may have changed; it is rebuilt on next use. The motion
+            // encoder starts with a keyframe, so nothing is owed either way.
+            self.stillEncoder?.stop()
+            self.stillEncoder = nil
+            self.refinementLock.lock(); self.refinement.reset(); self.refinementLock.unlock()
             // The profile can differ across the switch, so the client needs the
             // new parameter sets and an IDR to start from.
             self.packetizer?.invalidateParameterSetCache()
@@ -872,12 +914,25 @@ final class StreamController: ObservableObject {
 
     private func startIdleHeartbeat() {
         let timer = DispatchSource.makeTimerSource(queue: encodeQueue)
-        timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
+        // Ten times a second: cheap, since it does nothing unless something is
+        // owed, and it is what decides how soon after you stop moving a still
+        // picture is sharpened.
+        timer.schedule(deadline: .now() + 0.1, repeating: 0.1)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             // A key held on this Mac by a client that has since gone quiet.
             self.injector?.watchdog()
             guard let encoder = self.encoder else { return }
+
+            self.refinementLock.lock()
+            let refreshDue = self.refinement.shouldRefresh(now: ProcessInfo.processInfo.systemUptime)
+            let refining = self.refinement.enabled
+            self.refinementLock.unlock()
+            if refreshDue {
+                self.refreshStillPicture()
+                return
+            }
+
             guard self.forceKeyframeFlag else { return }
 
             // If frames are still arriving, the capture path will pick the flag
@@ -886,6 +941,12 @@ final class StreamController: ObservableObject {
             let idleFor = CFAbsoluteTimeGetCurrent() - self.lastEncodeSubmitTime
             guard idleFor > 0.2 else { return }
             guard let latest = self.lastCapturedBuffer else { return }
+
+            // A keyframe of a still picture may as well be the sharp one.
+            if refining {
+                self.refreshStillPicture()
+                return
+            }
 
             self.forceKeyframeFlag = false
             // Host time clock, same as ScreenCaptureKit stamps its frames with.
@@ -898,6 +959,49 @@ final class StreamController: ObservableObject {
         }
         timer.resume()
         idleTimer = timer
+    }
+
+    /// Outside the async pipeline start, for the same reason as
+    /// setInputAccepted: NSLock is not to be held across a suspension point.
+    private func resetRefinement(enabled: Bool) {
+        refinementLock.lock()
+        refinement = StillRefinement()
+        refinement.enabled = enabled
+        refinementLock.unlock()
+    }
+
+    /// Sends the still picture once more as a keyframe from the constant-
+    /// quality encoder. Encode queue only.
+    ///
+    /// The motion encoder is drained first and the still one waited for after,
+    /// so the two never write into the packetizer at the same time.
+    private func refreshStillPicture() {
+        guard let encoder, let latest = lastCapturedBuffer else { return }
+        encoder.completeFrames()
+
+        let level = encoder.streamLevel
+        if stillEncoder == nil {
+            let still = makeEncoder(config: encoder.config.forStill(matching: level), isMotion: false)
+            do {
+                try still.start()
+                stillEncoder = still
+            } catch {
+                // Not worth a stream: without it the picture is merely as good
+                // as it was. Stop trying for this session.
+                refinementLock.lock(); refinement.enabled = false; refinementLock.unlock()
+                return
+            }
+        }
+        let pts = CMClockGetTime(CMClockGetHostTimeClock())
+        stillEncoder?.encode(pixelBuffer: latest, presentationTime: pts, forceKeyframe: true)
+        stillEncoder?.completeFrames()
+        lastEncodeSubmitTime = CFAbsoluteTimeGetCurrent()
+        forceKeyframeFlag = false
+
+        refinementLock.lock(); refinement.refreshSent(); refinementLock.unlock()
+        if StreamController.logsProgress {
+            StreamController.statsLog.notice("still picture refreshed at constant quality")
+        }
     }
 
     // MARK: - stats

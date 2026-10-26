@@ -14,6 +14,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
 #import "LSGLView.h"
+#include "rtp_protocol.h"
 #import <OpenGL/OpenGL.h>
 #import <OpenGL/gl.h>
 #import <OpenGL/glext.h>
@@ -23,6 +24,47 @@
 #import <CoreServices/CoreServices.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
+
+// BT.709, video range, written out rather than left to GL_YCBCR_422_APPLE.
+//
+// The host captures with ScreenCaptureKit, which converts to YCbCr with the
+// BT.709 matrix -- measured, and tagged so on its buffers. The built-in
+// conversion is a fixed matrix inside the driver, and which one depends on the
+// driver: on a current Mac it comes out within 2 code values of BT.709, but
+// what a 2010 Radeon under 10.9 does could not be checked from here. If it is
+// the older BT.601 one, foliage comes out 14 code values too green and skin
+// tones shift with it. So the client measures the built-in conversion when it
+// starts, and only if that is off does it use this instead.
+//
+// GL_RGB_422_APPLE hands over the 2vuy samples unconverted: luma in green,
+// Cb in blue, Cr in red. No #version line: GLSL 1.10, which every Mac that
+// runs 10.9 has.
+static const char *kColourShaderSource =
+    "#extension GL_ARB_texture_rectangle : enable\n"
+    "uniform sampler2DRect frame;\n"
+    "void main() {\n"
+    "    vec3 s = texture2DRect(frame, gl_TexCoord[0].st).rgb;\n"
+    "    float y  = (s.g - 16.0 / 255.0) * (255.0 / 219.0);\n"
+    "    float cb = (s.b - 128.0 / 255.0) * (255.0 / 224.0);\n"
+    "    float cr = (s.r - 128.0 / 255.0) * (255.0 / 224.0);\n"
+    "    gl_FragColor = vec4(y + 1.5748 * cr,\n"
+    "                        y - 0.1873 * cb - 0.4681 * cr,\n"
+    "                        y + 1.8556 * cb, 1.0);\n"
+    "}\n";
+
+// The colours the check draws: mid-tones, because a wrong matrix moves those
+// and leaves greys and saturated primaries alone.
+static const int kColourCheckPatches[4][3] = {
+    { 80, 160,  80},    // leaf
+    {200, 120,  80},    // skin
+    { 90, 150, 210},    // sky
+    {128, 128, 128},    // grey
+};
+#define LS_COLOUR_PATCH_WIDTH 16
+#define LS_COLOUR_CHECK_HEIGHT 8
+// Within this many code values per channel counts as right. Rounding to
+// 8-bit YCbCr and back costs one or two on its own.
+#define LS_COLOUR_TOLERANCE 4
 
 @implementation LSGLView {
     GLuint _texture;
@@ -62,6 +104,16 @@
     /// has stopped, which is what a frozen picture looks like from the inside
     /// and used to leave no trace at all.
     uint32_t _framesDrawn;
+
+    // How 2vuy frames are turned into RGB, decided once by measuring.
+    GLuint _colourProgram;          // the BT.709 shader, 0 if it could not be built
+    GLint  _colourSampler;
+    GLuint _colourCheckTexture;
+    CVPixelBufferRef _colourCheckBuffer;
+    BOOL   _colourChecked;
+    BOOL   _useColourShader;
+    int    _colourError;            // worst channel error of the path in use
+    BOOL   _stripColourTags;        // test only: see -colourStripTags
     double _hostPointsPerViewPoint;
     GLuint _cursorTexture;
     NSData *_pendingCursorImage;
@@ -106,6 +158,12 @@
         _loggedUnsupportedFormat = 0;
         _texImageFailures = 0;
         _hostPointsPerViewPoint = 1.0;
+        _colourError = -1;
+        // Test only. Strips the colour tags off every decoded frame, which is
+        // what a decoder that does not tag its output would hand over -- and
+        // on a current Mac makes the built-in conversion fall back to BT.601.
+        // It is how the shader fallback is tested without a Mac that needs it.
+        _stripColourTags = [[NSUserDefaults standardUserDefaults] boolForKey:@"colourStripTags"];
         _vsyncEnabled = NO;
         pthread_mutex_init(&_renderMutex, NULL);
         pthread_cond_init(&_renderCond, NULL);
@@ -118,6 +176,7 @@
     pthread_mutex_destroy(&_renderMutex);
     pthread_cond_destroy(&_renderCond);
     if (_currentBuffer) CVBufferRelease(_currentBuffer);
+    if (_colourCheckBuffer) CVBufferRelease(_colourCheckBuffer);
 }
 
 #pragma mark - render thread
@@ -290,6 +349,11 @@
 
 - (void)presentPixelBuffer:(CVPixelBufferRef)pixelBuffer {
     if (!pixelBuffer) return;
+    if (_stripColourTags) {
+        CVBufferRemoveAllAttachments(pixelBuffer);
+        IOSurfaceRef surface = CVPixelBufferGetIOSurface(pixelBuffer);
+        if (surface) IOSurfaceRemoveAllValues(surface);
+    }
 
     [_stateLock lock];
     if (_currentBuffer) CVBufferRelease(_currentBuffer);
@@ -376,6 +440,12 @@
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
+    // Once, before the first 2vuy frame, with the context that will draw it.
+    // Ahead of the clear, so the check's corner is wiped before anything shows.
+    if (buffer && CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_422YpCbCr8) {
+        [self checkColourIfNeeded:cgl like:buffer];
+    }
+
     glClear(GL_COLOR_BUFFER_BIT);
 
     if (buffer) {
@@ -404,6 +474,184 @@
     _framesDrawn++;
 }
 
+#pragma mark - colour
+
+/// Builds the BT.709 shader, if this driver can hand over 4:2:2 samples
+/// unconverted at all. Returns whether it is usable.
+- (BOOL)prepareColourShader {
+    if (_colourProgram) return YES;
+    const char *extensions = (const char *)glGetString(GL_EXTENSIONS);
+    if (!extensions || !strstr(extensions, "GL_APPLE_rgb_422")) return NO;
+
+    GLuint shader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(shader, 1, &kColourShaderSource, NULL);
+    glCompileShader(shader);
+    GLint ok = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512] = {0};
+        glGetShaderInfoLog(shader, sizeof(log) - 1, NULL, log);
+        NSLog(@"[LanScreen] colour shader did not compile: %s", log);
+        glDeleteShader(shader);
+        return NO;
+    }
+    GLuint program = glCreateProgram();
+    glAttachShader(program, shader);
+    glLinkProgram(program);
+    glDeleteShader(shader);
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (!ok) { glDeleteProgram(program); return NO; }
+    _colourProgram = program;
+    _colourSampler = glGetUniformLocation(program, "frame");
+    return YES;
+}
+
+/// A small 2vuy picture of the check patches, encoded with BT.709 at video
+/// range -- exactly what the host's capture produces.
+- (CVPixelBufferRef)colourCheckBuffer {
+    if (_colourCheckBuffer) return _colourCheckBuffer;
+    size_t width = 4 * LS_COLOUR_PATCH_WIDTH, height = LS_COLOUR_CHECK_HEIGHT;
+    NSDictionary *attributes = @{ (id)kCVPixelBufferIOSurfacePropertiesKey: @{} };
+    CVPixelBufferRef buffer = NULL;
+    if (CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_422YpCbCr8,
+                            (__bridge CFDictionaryRef)attributes, &buffer) != kCVReturnSuccess) {
+        return NULL;
+    }
+    CVPixelBufferLockBaseAddress(buffer, 0);
+    uint8_t *base = CVPixelBufferGetBaseAddress(buffer);
+    size_t stride = CVPixelBufferGetBytesPerRow(buffer);
+    for (size_t y = 0; y < height; y++) {
+        for (size_t x = 0; x < width; x += 2) {
+            const int *c = kColourCheckPatches[x / LS_COLOUR_PATCH_WIDTH];
+            double r = c[0] / 255.0, g = c[1] / 255.0, b = c[2] / 255.0;
+            double luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            uint8_t Y  = (uint8_t)lround(16.0 + 219.0 * luma);
+            uint8_t Cb = (uint8_t)lround(128.0 + 224.0 * (b - luma) / 1.8556);
+            uint8_t Cr = (uint8_t)lround(128.0 + 224.0 * (r - luma) / 1.5748);
+            uint8_t *p = base + y * stride + x * 2;      // Cb Y0 Cr Y1
+            p[0] = Cb; p[1] = Y; p[2] = Cr; p[3] = Y;
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(buffer, 0);
+    _colourCheckBuffer = buffer;
+    return buffer;
+}
+
+/// Draws the check patches through one conversion into the corner of the
+/// back buffer, reads them back, and returns the worst channel error in code
+/// values -- 255 if it could not be measured at all. The frame drawn straight
+/// afterwards clears the corner, and nothing is shown until then.
+- (int)measureColour:(BOOL)withShader cgl:(CGLContextObj)cgl {
+    CVPixelBufferRef buffer = [self colourCheckBuffer];
+    IOSurfaceRef surface = buffer ? CVPixelBufferGetIOSurface(buffer) : NULL;
+    if (!surface) return 255;
+    GLsizei width = (GLsizei)IOSurfaceGetWidth(surface), height = (GLsizei)IOSurfaceGetHeight(surface);
+
+    if (!_colourCheckTexture) glGenTextures(1, &_colourCheckTexture);
+    glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, _colourCheckTexture);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    CGLError err = CGLTexImageIOSurface2D(cgl, GL_TEXTURE_RECTANGLE_ARB, GL_RGB, width, height,
+                                          withShader ? GL_RGB_422_APPLE : GL_YCBCR_422_APPLE,
+                                          GL_UNSIGNED_SHORT_8_8_APPLE, surface, 0);
+    if (err != kCGLNoError) {
+        glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
+        return 255;
+    }
+    if (withShader) {
+        glUseProgram(_colourProgram);
+        glUniform1i(_colourSampler, 0);
+    }
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glBegin(GL_QUADS);
+        glTexCoord2f(0, 0);                          glVertex2d(0, 0);
+        glTexCoord2f((GLfloat)width, 0);             glVertex2d(width, 0);
+        glTexCoord2f((GLfloat)width, (GLfloat)height); glVertex2d(width, height);
+        glTexCoord2f(0, (GLfloat)height);            glVertex2d(0, height);
+    glEnd();
+    if (withShader) glUseProgram(0);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
+
+    int worst = 0;
+    for (int i = 0; i < 4; i++) {
+        uint8_t pixel[4] = {0};
+        glReadPixels(i * LS_COLOUR_PATCH_WIDTH + LS_COLOUR_PATCH_WIDTH / 2,
+                     LS_COLOUR_CHECK_HEIGHT / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        for (int c = 0; c < 3; c++) {
+            int e = abs((int)pixel[c] - kColourCheckPatches[i][c]);
+            if (e > worst) worst = e;
+        }
+    }
+    return worst;
+}
+
+/// Decides, once, how 2vuy frames are converted to RGB: the driver's built-in
+/// conversion if it measures right, the BT.709 shader if it does not.
+///
+/// The built-in conversion follows the colour tags on each frame: on a current
+/// Mac an untagged 2vuy picture is converted with BT.601 -- 14 code values out
+/// on foliage -- and one tagged BT.709 comes out right. Real frames arrive
+/// tagged by the decoder, so the check copies the first real frame's tags onto
+/// its own picture before measuring. Otherwise it measures a picture no real
+/// frame looks like, and reports the built-in conversion wrong when it is not.
+/// Whether 10.9's decoder tags its frames, and whether a 2010 driver reads the
+/// tags, is exactly what cannot be known from here; this way it does not have
+/// to be.
+///
+/// `-colourPath builtin` or `-colourPath shader` forces one, for testing.
+- (void)checkColourIfNeeded:(CGLContextObj)cgl like:(CVPixelBufferRef)frame {
+    if (_colourChecked) return;
+    _colourChecked = YES;
+
+    CVPixelBufferRef check = [self colourCheckBuffer];
+    if (check && frame) {
+        CVBufferRemoveAllAttachments(check);
+        CVBufferPropagateAttachments(frame, check);
+    }
+
+    NSString *forced = [[[NSUserDefaults standardUserDefaults] stringForKey:@"colourPath"]
+                        lowercaseString];
+    BOOL shaderUsable = [self prepareColourShader];
+    int builtIn = [self measureColour:NO cgl:cgl];
+    int shader = shaderUsable ? [self measureColour:YES cgl:cgl] : 255;
+
+    if ([forced isEqualToString:@"shader"] && shaderUsable) {
+        _useColourShader = YES;
+    } else if ([forced isEqualToString:@"builtin"]) {
+        _useColourShader = NO;
+    } else {
+        _useColourShader = builtIn > LS_COLOUR_TOLERANCE && shader < builtIn;
+    }
+    _colourError = _useColourShader ? shader : builtIn;
+
+    BOOL wasForced = [forced isEqualToString:@"shader"] || [forced isEqualToString:@"builtin"];
+    if (wasForced) {
+        NSLog(@"[LanScreen] colour check: built-in conversion within %d of BT.709, shader "
+              @"within %d; using the %@, as forced", builtIn, shader,
+              _useColourShader ? @"shader" : @"built-in conversion");
+    } else if (!_useColourShader) {
+        NSLog(@"[LanScreen] colour check: the built-in conversion is within %d of BT.709, "
+              @"so it is used", builtIn);
+    } else {
+        NSLog(@"[LanScreen] colour check: the built-in conversion is off by up to %d code "
+              @"values, so a BT.709 shader is used instead, within %d", builtIn, shader);
+    }
+    if (_colourError > LS_COLOUR_TOLERANCE && !wasForced) {
+        NSLog(@"[LanScreen] colour check: colours are up to %d code values off and "
+              @"nothing here could do better (the shader is %@)", _colourError,
+              shaderUsable ? @"no closer" : @"not available on this driver");
+    }
+}
+
+- (uint32_t)colourFlags {
+    if (!_colourChecked || _colourError < 0) return 0;
+    uint32_t flags = LS_DECODER_COLOUR_CHECKED;
+    if (_useColourShader) flags |= LS_DECODER_COLOUR_SHADER;
+    flags |= (uint32_t)(_colourError > 255 ? 255 : _colourError) << LS_DECODER_COLOUR_ERROR_SHIFT;
+    return flags;
+}
+
 - (void)drawBuffer:(CVPixelBufferRef)buffer
      intoViewWidth:(GLsizei)viewWidth
             height:(GLsizei)viewHeight
@@ -424,7 +672,7 @@
         // describes. GL_YCBCR_422_APPLE (as opposed to GL_RGB_422_APPLE) is the
         // variant that performs the colour conversion for us.
         internalFormat = GL_RGB;
-        glFormat = GL_YCBCR_422_APPLE;
+        glFormat = _useColourShader ? GL_RGB_422_APPLE : GL_YCBCR_422_APPLE;
         glType = GL_UNSIGNED_SHORT_8_8_APPLE;
     } else if (format == kCVPixelFormatType_32BGRA) {
         internalFormat = GL_RGBA;
@@ -467,6 +715,12 @@
     double originX = ((double)viewWidth - drawWidth) * 0.5;
     double originY = ((double)viewHeight - drawHeight) * 0.5;
 
+    BOOL shading = _useColourShader && format == kCVPixelFormatType_422YpCbCr8;
+    if (shading) {
+        glUseProgram(_colourProgram);
+        glUniform1i(_colourSampler, 0);
+    }
+
     // Texture rectangle coordinates are in texels, and the image is top-down
     // while GL is bottom-up, hence the flipped T coordinates.
     glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
@@ -484,6 +738,9 @@
         glVertex2d(originX, originY + drawHeight);
     glEnd();
 
+    // Back to fixed function before the pointer is drawn: it is RGBA, and
+    // running it through the YCbCr shader would turn it into nonsense.
+    if (shading) glUseProgram(0);
     glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
 }
 

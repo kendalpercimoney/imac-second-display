@@ -127,6 +127,11 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         // request on a still screen, and that holds one buffer out of the pool.
         config.queueDepth = 5
         config.colorSpaceName = CGColorSpace.sRGB
+        // BT.709, said rather than assumed. It is what ScreenCaptureKit uses
+        // anyway -- measured against a BGRA capture of the same screen, 0.11
+        // code values off against 2.70 for BT.601 -- but a default is a promise
+        // nobody made, and the client and the stream's own tags depend on it.
+        config.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen,

@@ -32,12 +32,19 @@ final class StreamSettings: ObservableObject {
     }
 
     enum Profile: String, CaseIterable, Identifiable {
-        /// Baseline is the safe default: no CABAC, no B-frames, and it is what
-        /// the 2010 iMac's hardware decoder is happiest with.
+        /// The simplest H.264 there is: no CABAC, no 8x8 transform.
         case baseline = "Baseline"
-        /// Slightly better quality per bit, but CABAC costs the old GPU more.
-        case main = "Main"
+        /// CABAC and the 8x8 transform: measurably more detail at the same
+        /// bitrate. See VideoEncoder.Profile for the numbers.
+        case high = "High"
         var id: String { rawValue }
+
+        /// "Main" was an option until it turned out to be identical to
+        /// Baseline. Anyone who chose it wanted the better picture, which is
+        /// what High is.
+        init?(saved: String) {
+            if saved == "Main" { self = .high } else { self.init(rawValue: saved) }
+        }
     }
 
     @Published var clientAddress: String { didSet { save(clientAddress, "clientAddress") } }
@@ -158,7 +165,7 @@ final class StreamSettings: ObservableObject {
         height          = int("height", 1080)
         frameRate       = int("frameRate", 60)
         bitrateMbps     = dbl("bitrateMbps", 25)
-        profile         = Profile(rawValue: d.string(forKey: "ls.profile") ?? "") ?? .baseline
+        profile         = Profile(saved: d.string(forKey: "ls.profile") ?? "") ?? .high
         mtuPayload      = int("mtuPayload", Int(LS_DEFAULT_MTU_PAYLOAD))
         showsCursor     = d.object(forKey: "ls.showsCursor") as? Bool ?? true
         displayID       = UInt32(int("displayID", 0))

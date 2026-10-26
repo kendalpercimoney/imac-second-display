@@ -232,6 +232,17 @@ struct MenuBarPanel: View {
 
             if jumboAvailable { jumboHint }
 
+            if let off = colourError, off > 4 {
+                // The client measures its own colour conversion and switches to
+                // an exact one if the built-in one is wrong, so this only shows
+                // when neither could be made right. Nothing is said when it
+                // checks out, which is the normal case.
+                Text("Colours on the iMac measure up to \(off) code values off.")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Aero.red)
+                    .padding(.top, 4)
+            }
+
             if settings.forwardCursor && controller.client.hasSaidHello
                 && !controller.client.drawsCursor {
                 Text("This client cannot draw the pointer. Rebuild it, or turn the "
@@ -248,6 +259,14 @@ struct MenuBarPanel: View {
 
     private var decoderFlags: UInt32 { controller.client.stats.decoder_flags }
     private var decoderKnown: Bool { decoderFlags & UInt32(LS_DECODER_KNOWN) != 0 }
+
+    /// The worst colour error the client measured on the conversion it uses,
+    /// once it has said.
+    private var colourError: Int? {
+        guard controller.isRunning,
+              decoderFlags & UInt32(LS_DECODER_COLOUR_CHECKED) != 0 else { return nil }
+        return Int((decoderFlags >> UInt32(LS_DECODER_COLOUR_ERROR_SHIFT)) & 0xFF)
+    }
 
     private var decodingInSoftware: Bool {
         controller.isRunning && decoderKnown
@@ -267,8 +286,13 @@ struct MenuBarPanel: View {
     /// red readout without a guess attached.
     private var softwareBecauseOfLevel: Bool {
         decodingInSoftware
-            && controller.activeBitrateMbps * 1_000_000
-                > Double(StreamPlan.level42MaxBitsPerSecond)
+            && controller.activeBitrateMbps * 1_000_000 > Double(level42Ceiling)
+    }
+
+    /// Where the stream crosses from Level 4.2 to 5.0, for the profile in use.
+    private var level42Ceiling: Int {
+        StreamPlan.level42MaxBitsPerSecond(controller.plan?.profile
+            ?? (settings.profile == .high ? .high : .baseline))
     }
 
     /// Whether the configured packet size is being cut down to fit the link,
@@ -357,9 +381,9 @@ struct MenuBarPanel: View {
                 }
 
                 if softwareBecauseOfLevel {
-                    Text("Above 50 Mb/s the stream is H.264 Level 5, and the iMac "
-                         + "is decoding it in software, which is what heats it up. "
-                         + "Try 50 Mb/s or less.")
+                    Text("Above \(level42Ceiling / 1_000_000) Mb/s the stream is H.264 "
+                         + "Level 5, and the iMac is decoding it in software, which is "
+                         + "what heats it up. Try \(level42Ceiling / 1_000_000) Mb/s or less.")
                         .font(.system(size: 9.5))
                         .foregroundStyle(Aero.red)
                         .fixedSize(horizontal: false, vertical: true)

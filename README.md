@@ -899,6 +899,115 @@ the explanation and the panel does not offer it as one.
 Whether a 2010 iMac's decoder takes Level 5.0 is exactly the thing that could
 not be checked from here, which is why this is a report and not a cap.
 
+### Sharper, and the right colours
+
+Nothing here sharpens anything. A sharpening filter makes a picture look crisper
+by changing its pixels, which is the opposite of what you want when you are
+editing photos on it. This is about losing less of the picture on the way.
+
+**The geometry was already exact.** The 21.5-inch iMac is 1920x1080, the same
+as the stream, so every pixel lands on exactly one pixel of the panel, and the
+client samples the centre of each one. Nothing is scaled or blended. What was
+left was compression and colour.
+
+#### A still picture is refreshed at near-lossless quality
+
+When you stop moving, the picture on the iMac used to stay at whatever quality
+its last moving frame got, because nothing is sent until the screen changes
+again. On a zoom into a photograph with fine grain, that last frame measured
+33.5 dB at 25 Mb/s and 36.1 dB at 49 — visibly soft. Re-sending it does very
+little: the encoder decides the picture is good enough for its bitrate and sends
+265-byte frames saying nothing changed. Raising its quality on the fly is
+ignored, the same way raising its bitrate is.
+
+So once the screen has been still for 0.3 seconds, the host sends the picture
+again as a single keyframe from a second encoder running at constant quality.
+It measures **50.4 dB**, past the point anyone can see a difference, for about
+1.3 MB, which is 10 ms on a gigabit cable. It is matched to the level of the
+stream it joins, so it carries identical parameter sets and the iMac's decoder
+carries on without rebuilding. The motion encoder's next frame is then a
+keyframe too, because the picture the iMac predicts from has changed under it.
+
+Not every pause earns one. Typing sends small frames and a caret blinks twice a
+second; a refresh after each would be a megabyte per blink. It is earned by real
+change — 300 KB of moving frames since the last refresh — and the keyframes it
+forces do not count towards the next. If it ever misbehaves:
+
+```bash
+defaults write com.lanscreen.host ls.refineStill -bool false
+```
+
+#### High profile, which keeps more detail for the same bitrate
+
+| profile, same bitrate | mean, 25 / 49 Mb/s | worst frame, 25 / 49 Mb/s |
+|---|---|---|
+| Baseline | 40.22 / 42.83 dB | 32.11 / 34.82 dB |
+| **High** | **41.32 / 43.51 dB** | **32.86 / 35.91 dB** |
+
+Worth about a quarter more bitrate, for nothing; almost all of it is CABAC, the
+more efficient entropy coder. The Profile setting offered Main as well, with
+CABAC switched off on the theory that it was too much work for a 2010 decoder.
+Main without CABAC is bit-for-bit identical to Baseline, so that option never did
+anything; it is gone, and a saved "Main" comes back as High. High is the default
+for new installs. That iMac decodes H.264 in hardware, where CABAC costs nothing,
+and the Decoder readout says if it ever does not.
+
+High also keeps the stream at Level 4.2 up to 62 Mb/s rather than 50, so Video
+mode can go further before the iMac might fall back to software decoding.
+
+#### Colour, measured rather than assumed
+
+The host captures with ScreenCaptureKit, which converts to YCbCr with the BT.709
+matrix — measured against an RGB capture of the same screen, 0.11 code values
+out against 2.70 for the older BT.601 one. The client has to convert back with
+the same matrix, or every colour that is not grey or fully saturated shifts. But
+the stream carried no colour information at all, so the iMac had to guess.
+
+On a current Mac the built-in conversion follows a tag on each decoded frame,
+and falls back to BT.601 when there is none: 14 code values too green on a leaf,
+17 at worst end to end. Whether 10.9 tags its frames, and whether a 2010
+graphics driver reads the tag, could not be checked from here. So now:
+
+- The stream says what it is: BT.709 matrix and primaries, sRGB transfer, video
+  range.
+- The client **checks itself** on the first frame: it draws four mid-tones
+  through its own conversion, with the real frame's tags, reads the pixels back
+  and compares them with what BT.709 says they should be. If the built-in
+  conversion is off, it switches to a small shader that does the BT.709 maths
+  itself. It logs what it found, and the panel says so only if neither could be
+  made right.
+
+`./Tests/run_colour_test.sh` checks twelve mid-tone patches end to end, to
+within 4 code values, four ways: tagged frames, the shader forced, untagged
+frames with the built-in conversion forced — which must get them wrong, or the
+test proves nothing — and untagged frames left to decide, which must switch to
+the shader and get them right. The render test's quadrants are pure primaries
+with ±40 of tolerance and could never have caught any of this.
+
+#### For accurate colour on the iMac
+
+The stream carries sRGB, and the iMac shows those values as they are. So the
+picture is as accurate as the iMac's panel is to sRGB. To make it accurate,
+**calibrate the iMac itself to sRGB** (D65 white, sRGB tone curve) on the iMac,
+with a colorimeter if you have one. A calibration's tone curves are applied by
+the iMac's graphics card to everything it shows, LanScreen's picture included.
+
+Capturing in the LanScreen display's own colour space, and giving that display
+the iMac's profile on the Mac, would in principle let macOS colour-manage for the
+iMac directly. It was measured and not done: left without a colour space,
+ScreenCaptureKit does not simply pass the display's values through — on a
+display whose profile converts to sRGB unchanged, it altered 14% of the picture
+by up to 95 code values, against none between two captures with the same
+setting — and what it does instead could not be pinned down.
+
+#### Not done
+
+- **4:4:4 colour.** Colour detail is half resolution each way in H.264 as the
+  iMac can decode it in hardware. Thin coloured lines and small coloured text
+  show it; photographs mostly do not.
+- **Rendering at twice the resolution and scaling down.** Text would be
+  smoother, but photos would be resampled rather than shown pixel for pixel.
+
 ### Video mode
 
 One switch in the panel, meant to be reached for mid-stream: it swaps the
@@ -1491,122 +1600,6 @@ video packet, losing one costs a single cursor update and it is re-sent within
 five seconds, so it is not worth a protocol change to fix. If `netstat -s -p ip`
 shows a handful of fragmented datagrams while streaming and the video shows no
 loss, this is what they are.
-
-### Sleep, and coming back from it
-
-ScreenCaptureKit stops when the Mac sleeps. "Stop streaming when this Mac
-sleeps" decides whether BYE is sent first — so the iMac drops its keep-awake
-assertion and sleeps too rather than sitting lit up all night on a frozen frame
-— but it does not decide whether the capture survives. Nothing does. The capture
-ends either way, which is why turning that setting off did not avoid any of
-this.
-
-So the usual way this stream ended was `onStreamStopped`, and that called
-`stop()` and left it there. The iMac went on showing the last frame it had been
-sent, which from in front of it is indistinguishable from a freeze: the picture
-stops and nothing says why. Pressing Start afterwards then met "No capturable
-display found", because `SCShareableContent` returns an empty list for a second
-or two after wake while the window server republishes displays, and it was asked
-exactly once.
-
-A stop the app performs is now recorded as distinct from a stop the user asked
-for, only the first is owed back, and the display lookup is retried for five
-seconds. The resume waits for the teardown to finish rather than assuming it
-has — `stop()` tears down inside a Task, so a lid closed and opened straight
-away finds the old stream still shutting down.
-
-Bounded, because retrying is right for a capture that stopped because the Mac
-slept and wrong for one that stops immediately every time. Four short-lived
-restarts in a row and it gives up and says to check Screen Recording, which is
-what that failure actually looks like.
-
-### It says where it went
-
-Launching an accessory app looks exactly like launching nothing: no Dock icon,
-no window, and on a laptop with a notch the status item may be behind it or
-pushed out of the menu bar altogether. So the host opens with a box carrying the
-icon itself, drawn six times menu-bar size, because "look for the little screen"
-is not much help when you cannot find it. It has a "Don't show this again"
-checkbox, and `--with-window` skips it.
-
-### The panel is not in a ScrollView
-
-A `MenuBarExtra` popover takes its size from its content, and a `ScrollView` has
-no height of its own to give it — it fills what it is handed, which in a popover
-is nothing. Wrapping the body in one, to stop a 718-point panel running off the
-bottom of a laptop screen, made the panel stop appearing at all. The way to make
-it fit is for it to be shorter.
-
-### Moshing: decoding a frame whose predecessor was thrown away
-
-Every frame after a keyframe is a set of changes to the one before it. The
-decode queue kept latency down by throwing away its oldest waiting frame when
-decoding fell behind — and then decoding the next frame anyway, applying its
-changes to a picture they were never meant for. The damage is copied forward
-into every frame until the next keyframe, up to five seconds later: blocks
-smeared and dragged across the picture. Decoding falls behind on exactly the
-frames scrolling and zooming produce, which is when it was seen.
-
-Measured with real frames really decoded, each scored against what it should
-have been (`./Tests/run_decoder_drop_test.sh`, a scrolling 1280x720 page):
-
-| | worst frame shown | damaged frames shown |
-|---|---|---|
-| decode everything | 38.9 dB | 0 |
-| drop one frame, carry on (as it was) | **16.7 dB** | **49**, until the keyframe |
-| drop one frame, wait for a keyframe (now) | 38.9 dB | 0 |
-
-The rule now is that a frame is never decoded unless the one before it was.
-When the queue is full, the newest frame is refused rather than the oldest, so
-the frames already waiting — a complete chain — still decode correctly, and
-nothing after the gap is decoded until a keyframe arrives. The client asks for
-one at once, and again for every frame refused until it comes, because a lost
-request would otherwise mean waiting for the host's own schedule. A frame the
-decoder rejects is treated the same way. A keyframe also overtakes anything
-still waiting ahead of it, which could only put the picture further behind.
-
-The cost is the picture holding still for a round trip instead of being wrong
-for seconds. In the panel, Dropped counts the frames this refuses. If it climbs
-while scrolling, the iMac cannot decode the stream fast enough — and the
-Decoder readout says whether that is because it has fallen back to software.
-
-The loopback harness now answers keyframe requests the way the host does, so it
-exercises that recovery instead of waiting for a scheduled keyframe that a
-short run never reaches. It counts how often decoding fell behind rather than
-how many frames that cost, since one overflow now refuses a run of them.
-
-### Looking for a twelve-hour freeze
-
-The client stopped after about twelve hours, with no crash and nothing in the
-log. Twelve hours is close enough to the RTP timestamp's 13h15m wrap — 32 bits
-at 90 kHz — to be worth ruling in or out rather than reasoning about, so both
-halves were measured.
-
-`./Tests/run_client_soak_test.sh` pushes twelve hours of frames, 2.59 million of
-them and some fifty million packets, through the depacketizer in about ten
-seconds while watching its own resident memory, and walks the timestamp across
-the wrap on the way. Resident size moves by 16 KB over the whole run and is flat
-after the first few hundred thousand frames: one allocator bump, not a leak. The
-threshold was confirmed by breaking it — leaking four bytes per frame turns into
-65 bytes per frame of real growth and the run fails.
-
-The second half replays real encoded frames through `LSDecoder` with timestamps
-walking up to the wrap, across it, and out the other side. 279 frames out
-before, 301 after, nothing stuck in the queue. **So the wrap is not it**, and
-neither is anything that accumulates per frame or per packet.
-
-What that search did turn up is a different way to stop forever. Both receive
-loops gave up permanently after 500 consecutive errors, or on `EBADF` — one log
-line, the thread exits, and the app goes on running with a still picture. For
-the control socket that is worse than it sounds: no pings means the client
-decides the host has gone and blanks, and saying hello is what that same socket
-is for, so it could never hear it come back. Both now replace the socket instead
-of abandoning it.
-
-And because none of this reproduced the actual freeze, the client now says when
-it is stuck: frames decoding while none are drawn means the render thread has
-stopped, and that gets a line a second rather than a still screen and no
-explanation. Sockets being replaced gets one too.
 
 ### Measured and rejected: App Nap
 

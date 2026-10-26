@@ -164,7 +164,10 @@ let done = DispatchSemaphore(value: 0)
 let encoder = VideoEncoder(config: .init(width: width, height: height,
                                          frameRate: fps,
                                          bitrate: 12_000_000,
-                                         profile: .baseline,
+                                         // LS_PROFILE=high for High with CABAC,
+                                         // which the host defaults to now.
+                                         profile: ProcessInfo.processInfo.environment["LS_PROFILE"] == "high"
+                                             ? .high : .baseline,
                                          keyframeInterval: 1.0,
                                          lowLatencyRateControl: useLowLatency)) { sampleBuffer in
     packetizer.packetize(sampleBuffer: sampleBuffer)

@@ -761,6 +761,18 @@ Client/src/
   LSAudioPlayer.m        AudioQueue, and the delay line in front of it
   LSAudioReceiver.m      the audio socket and its receive loop
   LSBrightness.m         the iMac's panel, driven from the other machine
+Client/core/             portable C, shared by the Windows client, tested here
+  ls_depacketizer.c      RTP -> Annex B access units, wait for a keyframe after loss
+  ls_decode_queue.c      the mosh-safe queue
+  ls_decoder.c           FFmpeg H.264, hardware when given a device
+Client/windows/          Windows 7 x64 client, phase 0, cross-built with mingw-w64
+  build_ffmpeg.sh        FFmpeg 7.1.5, H.264 + DXVA2 only, pinned by SHA-256
+  build.sh               the program and its zip
+  main.c                 window, present loop, stats
+  network.c              video and control sockets
+  decode.c               the decoding thread
+  display.c              Direct3D 9Ex, DXVA2 video processor, colour check
+  run.cmd, README.txt    what goes in the zip beside it
 Tools/
   serve_to_imac.sh       packages the client source and serves it to the iMac
   fetch_from_imac.sh     brings the built client back the other way
@@ -778,6 +790,9 @@ Tests/
   AudioBench/main.m      what the ring buffer costs per second of audio
   SettingsAudit/main.swift  every control either does something or says it does not
   NapCheck/main.swift    whether an app with no window gets throttled
+  WindowsCore/           the Windows client's shared core, on real streams
+  run_windows_core_test.sh   that core: rules, then Baseline and High streams
+  run_windows_build_test.sh  the Windows build, and whether 7 would load it
 ```
 
 ## What was measured, and what it bought
@@ -1007,6 +1022,80 @@ setting — and what it does instead could not be pinned down.
   show it; photographs mostly do not.
 - **Rendering at twice the resolution and scaling down.** Text would be
   smoother, but photos would be resampled rather than shown pixel for pixel.
+
+### Windows 7 on the same iMac: phase 0
+
+The same iMac can boot 64-bit Windows 7, and there is a client for it in
+`Client/windows/`. This first phase answers one question before anything else
+is built on it: does Windows on this hardware decode the host's stream in
+hardware, quickly enough? So it receives the stream from the unchanged host,
+decodes it through DXVA2, shows it fullscreen, and reports back; the host's
+panel shows Decoder, Decode, Render and glass to glass for it exactly as it
+does for the OS X client. It does not yet draw its own pointer, play sound or
+send the iMac's keyboard and mouse. Its HELLO says so, and the host puts the
+pointer into the video instead.
+
+Windows 7 gets no security fixes any more. Keep it on the cable to the Mac.
+
+Build it on the Mac (`brew install mingw-w64 nasm` first):
+
+```bash
+./Client/windows/build.sh
+```
+
+That cross-builds FFmpeg 7.1.5 the first time — only the H.264 decoder and
+DXVA2, checked against a pinned SHA-256 — and makes
+`build/windows/LanScreen-Windows.zip`. To get it across the cable, serve that
+folder from the Mac and open `http://10.0.0.1:8000/` in the iMac's browser:
+
+```bash
+python3 -m http.server 8000 --bind 10.0.0.1 --directory build/windows
+```
+
+Then `run.cmd` in the zip. The `README.txt` beside it covers the three
+things Windows needs once: the address 10.0.0.2 on the Ethernet adapter, the
+Universal C Runtime (a Windows Update, KB2999226), and one firewall rule, which
+`run.cmd` asks permission to add. That rule allows UDP port 5000, from 10.0.0.1
+only, for `lanscreen.exe` only. It has to exist beforehand, because otherwise
+Windows asks behind the fullscreen picture, where nobody can see the question.
+
+How it is put together, and why:
+
+- **FFmpeg with DXVA2, not Media Foundation.** Media Foundation's low-latency
+  decoding mode arrived in Windows 8. FFmpeg's decoder is told to output each
+  picture as soon as it is decoded and is given a single thread. Measured on
+  the Mac with the same code in software: automatic threading without that
+  setting holds back eight frames, 133 ms at 60 fps, before the first picture.
+- **The reassembly and the moshing rules are shared C**, in `Client/core/`:
+  a port of the OS X client's depacketizer and decode queue, which emits
+  Annex B for FFmpeg instead of AVCC. They are tested on the Mac, rule by
+  rule, and then with real streams from the host's encoder in both profiles:
+  every access unit gives its picture at once, and the colour patches come
+  through within 3 code values.
+- **Direct3D 9Ex, exclusive fullscreen**, so the picture skips the desktop
+  compositor and its frame of latency, with a frame latency of one so
+  Direct3D does not queue three frames ahead. The decoder writes into DXVA2
+  surfaces on the same device, and the video processor converts them into the
+  back buffer, so a picture never leaves the graphics card.
+- **The colour conversion is told it is BT.709, then checked.** Before the
+  first picture, the twelve test colours go through the same video processor
+  and are read back. The worst error goes to the host in STATS, which warns
+  above 4 code values, as it does for the Mac client.
+- **An 8 MB receive buffer.** Winsock's default on Windows 7 is 8 KB, less
+  than one keyframe, which arrives as hundreds of packets inside a millisecond.
+
+What phase 0 cannot know until it runs on the iMac: whether the graphics
+driver decodes the host's stream (High profile at Level 4.2 by default) in
+hardware or quietly falls back to software, what decoding and presenting cost,
+and whether the driver converts as BT.709 when asked. `lanscreen.log` beside
+the program records all of it, along with the graphics card and driver.
+
+Built with Homebrew's mingw-w64, the program needs the Universal C Runtime,
+which Windows 7 only has once updated. Everything else it imports exists on
+Windows 7 — `./Tests/run_windows_build_test.sh` reads its import table and
+fails on any DLL Windows 7 lacks, any function from Windows 8 or later, or a
+header asking for a newer Windows to load it. Nothing on this Mac can run it,
+so that is checked rather than tried.
 
 ### Video mode
 

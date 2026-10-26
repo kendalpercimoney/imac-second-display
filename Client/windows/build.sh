@@ -17,18 +17,21 @@
 # Builds the Windows 7 x64 client on this Mac: build/windows/LanScreen-Windows/
 # with lanscreen.exe, run.cmd and README.txt, and a zip of the three.
 #
-# Needs mingw-w64 (brew install mingw-w64) and builds FFmpeg first if it has
-# not been built (Client/windows/build_ffmpeg.sh, which also needs nasm).
+# Needs nasm (brew install nasm). The first time, fetches the compiler
+# (setup_toolchain.sh) and builds FFmpeg (build_ffmpeg.sh).
 #
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HERE="$ROOT/Client/windows"
 CACHE="${LANSCREEN_CACHE:-$HOME/Library/Caches/LanScreen}"
-FFMPEG="$CACHE/ffmpeg-7.1.5-win64"
+FFMPEG="$CACHE/ffmpeg-7.1.5-win64-msvcrt"
 OUT="${OUT_DIR:-$ROOT/build/windows}"
 PACKAGE="$OUT/LanScreen-Windows"
-CC=x86_64-w64-mingw32-gcc
+# Against msvcrt.dll, which every Windows has; see setup_toolchain.sh.
+TOOLCHAIN="$("$HERE/setup_toolchain.sh")"
+export PATH="$TOOLCHAIN/bin:$PATH"
+CC=x86_64-w64-mingw32-clang
 
 [ -f "$FFMPEG/lib/libavcodec.a" ] || "$HERE/build_ffmpeg.sh"
 mkdir -p "$PACKAGE"

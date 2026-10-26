@@ -766,6 +766,7 @@ Client/core/             portable C, shared by the Windows client, tested here
   ls_decode_queue.c      the mosh-safe queue
   ls_decoder.c           FFmpeg H.264, hardware when given a device
 Client/windows/          Windows 7 x64 client, phase 0, cross-built with mingw-w64
+  setup_toolchain.sh     a compiler for msvcrt.dll, assembled from llvm-mingw
   build_ffmpeg.sh        FFmpeg 7.1.5, H.264 + DXVA2 only, pinned by SHA-256
   build.sh               the program and its zip
   main.c                 window, present loop, stats
@@ -1037,14 +1038,16 @@ pointer into the video instead.
 
 Windows 7 gets no security fixes any more. Keep it on the cable to the Mac.
 
-Build it on the Mac (`brew install mingw-w64 nasm` first):
+Build it on the Mac (`brew install nasm mingw-w64` first; mingw-w64 is only
+used by the build test, to read the program's import table):
 
 ```bash
 ./Client/windows/build.sh
 ```
 
-That cross-builds FFmpeg 7.1.5 the first time — only the H.264 decoder and
-DXVA2, checked against a pinned SHA-256 — and makes
+The first time, that fetches the compiler and cross-builds FFmpeg 7.1.5 —
+only the H.264 decoder and DXVA2 — both checked against pinned SHA-256s, and
+makes
 `build/windows/LanScreen-Windows.zip`. To get it across the cable, serve that
 folder from the Mac and open `http://10.0.0.1:8000/` in the iMac's browser:
 
@@ -1052,10 +1055,9 @@ folder from the Mac and open `http://10.0.0.1:8000/` in the iMac's browser:
 python3 -m http.server 8000 --bind 10.0.0.1 --directory build/windows
 ```
 
-Then `run.cmd` in the zip. The `README.txt` beside it covers the three
-things Windows needs once: the address 10.0.0.2 on the Ethernet adapter, the
-Universal C Runtime (a Windows Update, KB2999226), and one firewall rule, which
-`run.cmd` asks permission to add. That rule allows UDP port 5000, from 10.0.0.1
+Then `run.cmd` in the zip. The `README.txt` beside it covers the two things
+Windows needs once: the address 10.0.0.2 on the Ethernet adapter, and one
+firewall rule, which `run.cmd` asks permission to add. That rule allows UDP port 5000, from 10.0.0.1
 only, for `lanscreen.exe` only. It has to exist beforehand, because otherwise
 Windows asks behind the fullscreen picture, where nobody can see the question.
 
@@ -1090,12 +1092,20 @@ hardware or quietly falls back to software, what decoding and presenting cost,
 and whether the driver converts as BT.709 when asked. `lanscreen.log` beside
 the program records all of it, along with the graphics card and driver.
 
-Built with Homebrew's mingw-w64, the program needs the Universal C Runtime,
-which Windows 7 only has once updated. Everything else it imports exists on
-Windows 7 — `./Tests/run_windows_build_test.sh` reads its import table and
-fails on any DLL Windows 7 lacks, any function from Windows 8 or later, or a
-header asking for a newer Windows to load it. Nothing on this Mac can run it,
-so that is checked rather than tried.
+The first build, made with Homebrew's mingw-w64, would not start on the iMac:
+"api-ms-win-crt-convert-l1-1-0.dll is missing". Homebrew's compiler only
+targets the Universal C Runtime, which Windows 7 has only once a particular
+update is installed. The program is now built against msvcrt.dll, which every
+Windows has, so it needs nothing installed. The compiler for that is
+llvm-mingw, which publishes an msvcrt build only for Linux and a macOS build
+only for the UCRT; both come from one release with one compiler, so
+`Client/windows/setup_toolchain.sh` puts the Linux build's Windows libraries
+under the macOS compiler.
+
+`./Tests/run_windows_build_test.sh` reads the import table and fails on any
+DLL Windows 7 lacks, a C runtime other than msvcrt.dll, any function from
+Windows 8 or later, or a header asking for a newer Windows to load it. Nothing
+on this Mac can run the program, so that is checked rather than tried.
 
 ### Video mode
 

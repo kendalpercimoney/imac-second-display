@@ -21,16 +21,27 @@
 # all: the loader refuses it with "The procedure entry point ... could not be
 # located", before a single line of it runs. Nothing on this Mac can run it, so
 # this reads the import table instead. Every DLL it names has to be one
-# Windows 7 ships (or the Universal C Runtime, which run.cmd checks for), and
-# none of the functions can be from the list of ones added in Windows 8 and
-# later that toolchains and FFmpeg are known to reach for.
+# Windows 7 ships, and none of the functions can be from the list of ones added
+# in Windows 8 and later that toolchains and FFmpeg are known to reach for.
+#
+# The C runtime has to be msvcrt.dll. The Universal C Runtime is a DLL Windows
+# 7 only has after a particular update, and without it the program does not
+# start: "api-ms-win-crt-convert-l1-1-0.dll is missing from your computer",
+# which is what the first build did on the iMac.
+#
+# --no-build [dir] audits what build/windows (or dir) already holds instead.
+# Reads the import table with Homebrew's mingw-w64 objdump.
 #
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${TMPDIR:-/tmp}/lanscreen-windows-build"
-rm -rf "$OUT"
-OUT_DIR="$OUT" "$ROOT/Client/windows/build.sh" > "$OUT.log" 2>&1 || { cat "$OUT.log"; echo "RESULT: FAIL (build)"; exit 1; }
+if [ "${1:-}" = "--no-build" ]; then
+    OUT="${2:-$ROOT/build/windows}"
+else
+    OUT="${TMPDIR:-/tmp}/lanscreen-windows-build"
+    rm -rf "$OUT"
+    OUT_DIR="$OUT" "$ROOT/Client/windows/build.sh" > "$OUT.log" 2>&1 || { cat "$OUT.log"; echo "RESULT: FAIL (build)"; exit 1; }
+fi
 EXE="$OUT/LanScreen-Windows/lanscreen.exe"
 
 failures=0
@@ -48,8 +59,8 @@ version=$(awk '/MajorSubsystemVersion/{maj=$2} /MinorSubsystemVersion/{min=$2} E
 awk -v v="$version" 'BEGIN{split(v,p,"."); exit !(p[1] < 6 || (p[1] == 6 && p[2] <= 1))}'
 check "needs no newer Windows than 7 to load (it asks for $version; 7 is 6.1)" $?
 
-# Every DLL Windows 7 has, or the UCRT that run.cmd checks for.
-ALLOWED='^(KERNEL32|USER32|GDI32|WS2_32|IPHLPAPI|d3d9|dxva2|ole32|bcrypt|ADVAPI32|SHELL32)\.(dll|DLL)$|^api-ms-win-crt-[a-z]+-l1-1-0\.dll$'
+# DLLs every Windows 7 has.
+ALLOWED='^(KERNEL32|USER32|GDI32|WS2_32|IPHLPAPI|d3d9|dxva2|ole32|bcrypt|ADVAPI32|SHELL32|msvcrt)\.(dll|DLL)$'
 strangers=$(awk '{print $1}' "$OUT/imports.txt" | sort -u | grep -vE "$ALLOWED")
 # The status is taken first: the $(...) in the message would reset $? to 0.
 [ -z "$strangers" ]; status=$?
@@ -62,6 +73,9 @@ newer=$(awk '{print $2}' "$OUT/imports.txt" | grep -xE "$NEWER")
 check "calls nothing added after Windows 7${newer:+ -- calls: $(echo $newer)}" $status
 api_sets=$(awk '{print $1}' "$OUT/imports.txt" | sort -u | grep -i '^api-ms-win-core')
 [ -z "$api_sets" ]; check "uses none of Windows 8's API sets" $?
+awk '{print $1}' "$OUT/imports.txt" | grep -qx "msvcrt.dll" \
+    && ! awk '{print $1}' "$OUT/imports.txt" | grep -qi '^api-ms-win-crt\|^ucrtbase'
+check "its C runtime is msvcrt.dll, which every Windows has, not the UCRT" $?
 echo "  $(awk '{print $1}' "$OUT/imports.txt" | sort -u | wc -l | tr -d ' ') DLLs, $(wc -l < "$OUT/imports.txt" | tr -d ' ') functions"
 
 echo

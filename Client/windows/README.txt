@@ -12,11 +12,7 @@ Windows 7 no longer gets security fixes. Keep this PC on the cable to the Mac.
 Setting up, once
 ----------------
 
-1. The Universal C Runtime. Windows Update installs it (KB2999226, or the later
-   KB3118401). If run.cmd says it is missing, install that update, or the
-   Visual C++ 2015-2022 x64 redistributable from Microsoft.
-
-2. The cable's address. Control Panel > Network and Sharing Center > Change
+1. The cable's address. Control Panel > Network and Sharing Center > Change
    adapter settings > the Ethernet adapter on the cable > Properties >
    Internet Protocol Version 4 > Use the following IP address:
        IP address   10.0.0.2
@@ -24,14 +20,15 @@ Setting up, once
    Leave the gateway and DNS empty. This is the same address the iMac has
    under OS X; the Mac sends the picture to it.
 
-3. The firewall. The first time, run.cmd asks Windows for permission to add a
+2. The firewall. The first time, run.cmd asks Windows for permission to add a
    single rule: UDP port 5000, from 10.0.0.1 only, for lanscreen.exe only.
 
 
 Using it
 --------
 
-Double-click run.cmd. Start streaming on the Mac from LanScreen in the menu
+Double-click run.cmd rather than lanscreen.exe: it sets up the firewall rule
+the first time and checks the address. Start streaming on the Mac from LanScreen in the menu
 bar, if it is not already. Esc quits.
 
   run.cmd -windowed        a borderless window instead of exclusive fullscreen

@@ -1,17 +1,8 @@
 @echo off
-rem LanScreen for Windows 7: checks the three things it needs, then starts.
+rem LanScreen for Windows 7: checks the two things it needs, then starts.
 rem Anything after run.cmd is passed on, e.g.  run.cmd -windowed
 setlocal
 cd /d "%~dp0"
-
-if not exist "%SystemRoot%\System32\ucrtbase.dll" (
-    echo LanScreen needs the Universal C Runtime, which this copy of Windows 7
-    echo does not have yet. Windows Update installs it as KB2999226 or KB3118401,
-    echo or install the Visual C++ 2015-2022 x64 redistributable from Microsoft.
-    echo See README.txt.
-    pause
-    exit /b 1
-)
 
 ipconfig | find "10.0.0.2" >nul
 if errorlevel 1 (

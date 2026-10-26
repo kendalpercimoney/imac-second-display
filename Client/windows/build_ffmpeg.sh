@@ -33,15 +33,18 @@ SHA256="de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f"
 CACHE="${LANSCREEN_CACHE:-$HOME/Library/Caches/LanScreen}"
 TARBALL="$CACHE/ffmpeg-$VERSION.tar.xz"
 SRC="$CACHE/ffmpeg-$VERSION"
-PREFIX="$CACHE/ffmpeg-$VERSION-win64"
+# Built against msvcrt.dll, by the toolchain setup_toolchain.sh assembles; see
+# there for why. Kept apart from any earlier UCRT build: the two do not mix.
+PREFIX="$CACHE/ffmpeg-$VERSION-win64-msvcrt"
 CROSS="x86_64-w64-mingw32-"
+TOOLCHAIN="$("$(dirname "$0")/setup_toolchain.sh")"
+export PATH="$TOOLCHAIN/bin:$PATH"
 
 if [ -f "$PREFIX/lib/libavcodec.a" ] && [ "${1:-}" != "--rebuild" ]; then
     echo "FFmpeg $VERSION for Windows already built: $PREFIX"
     exit 0
 fi
 
-command -v "${CROSS}gcc" >/dev/null || { echo "need mingw-w64: brew install mingw-w64" >&2; exit 1; }
 command -v nasm >/dev/null || { echo "need nasm: brew install nasm" >&2; exit 1; }
 
 mkdir -p "$CACHE"
@@ -62,7 +65,7 @@ cd "$SRC"
 # import the Windows 7 audit would have to clear, for a feature never used.
 ./configure \
     --prefix="$PREFIX" \
-    --enable-cross-compile --cross-prefix="$CROSS" \
+    --enable-cross-compile --cross-prefix="$CROSS" --cc="${CROSS}clang" \
     --target-os=mingw32 --arch=x86_64 \
     --disable-everything --disable-autodetect \
     --disable-programs --disable-doc --disable-network \

@@ -79,7 +79,7 @@ struct SettingsView: View {
                      diameter: 14, lit: controller.isRunning)
                 .padding(.leading, 3)
             VStack(alignment: .leading, spacing: 0) {
-                Text("LanScreen Greedy")
+                Text("LanScreen")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
                     .shadow(color: .black.opacity(0.45), radius: 1.5, y: 0.5)

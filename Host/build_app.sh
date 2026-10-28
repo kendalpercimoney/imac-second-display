@@ -23,7 +23,10 @@ set -euo pipefail
 
 CONFIG="${1:-release}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP="$ROOT/build/LanScreenHost.app"
+# Overridable so a release can be built beside the copy you run, rather than
+# re-signing that one out from under its permissions (Tools/make_release.sh).
+OUT="${OUT_DIR:-$ROOT/build}"
+APP="$OUT/LanScreenHost.app"
 
 cd "$ROOT"
 echo "==> swift build -c $CONFIG"

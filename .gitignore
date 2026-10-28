@@ -12,3 +12,9 @@ build/
 # Xcode
 *.xcuserdatad
 xcuserdata/
+
+# Release zips, made by Tools/make_release.sh
+dist/
+
+# Client logs saved for diagnosis
+*.log

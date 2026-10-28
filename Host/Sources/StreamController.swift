@@ -117,6 +117,15 @@ final class StreamController: ObservableObject {
     /// plan can be rebuilt mid-stream without asking the socket again.
     private var startedWithLinkMTU: Int?
     private var forceKeyframeFlag = false
+
+    // Pacing, all on encodeQueue. See paceInterval.
+    /// The client's decode time per frame: the peak of what it has reported,
+    /// decaying slowly. 0 until it has said.
+    private var clientDecodeSeconds: Double = 0
+    /// A captured frame held back by the pace, to go when it allows.
+    private var deferredFrame: (buffer: CVPixelBuffer, time: CMTime)?
+    /// When a keyframe last went out, for the cap in onKeyframeRequested.
+    private var lastKeyframeAt: CFAbsoluteTime = 0
     private var sdpWritten = false
     /// Whether the stream that stopped was stopped by this app rather than by
     /// the user, and so is owed back.
@@ -458,7 +467,15 @@ final class StreamController: ObservableObject {
         let control = ControlChannel()
         control.onKeyframeRequested = { [weak self] in
             guard let self else { return }
-            self.encodeQueue.async { self.forceKeyframeFlag = true }
+            self.encodeQueue.async {
+                // One keyframe repairs the client, and it asks again while it
+                // waits. Measured on the iMac before this: nine requests a
+                // second answered with nine keyframes a second, 130 Mb/s of the
+                // most expensive frames there are, poured onto a decoder that
+                // was asking because it had fallen behind.
+                guard CFAbsoluteTimeGetCurrent() - self.lastKeyframeAt >= 0.3 else { return }
+                self.forceKeyframeFlag = true
+            }
             self.onMain { self.keyframeRequests += 1 }
         }
         control.onClientMAC = { [weak self] mac in
@@ -481,6 +498,15 @@ final class StreamController: ObservableObject {
         }
         control.onStateChanged = { [weak self] state in
             self?.onMain { self?.client = state }
+            let reported = Double(state.stats.decode_us) / 1_000_000
+            self?.encodeQueue.async {
+                guard let self else { return }
+                // Hold the peak and let it fade over half a minute or so: a
+                // still screen decodes in 5 ms, and pacing a new gesture to
+                // that would flood the decoder for the second it takes the
+                // next report to arrive.
+                self.clientDecodeSeconds = max(reported, self.clientDecodeSeconds * 0.97)
+            }
         }
 
         let injector = InputInjector()
@@ -697,6 +723,8 @@ final class StreamController: ObservableObject {
             self.control = nil
             self.capture = nil
             self.lastCapturedBuffer = nil
+            self.deferredFrame = nil
+            self.clientDecodeSeconds = 0
         }
 
         // Last, so the display does not vanish out from under a capture that
@@ -711,22 +739,14 @@ final class StreamController: ObservableObject {
 
     private func handleCapturedFrame(_ pixelBuffer: CVPixelBuffer, _ time: CMTime) {
         encodeQueue.async {
-            guard let encoder = self.encoder else { return }
+            guard self.encoder != nil else { return }
 
             self.refinementLock.lock()
             let afterRefresh = self.refinement.frameCaptured(at: ProcessInfo.processInfo.systemUptime)
             self.refinementLock.unlock()
-            let force = self.forceKeyframeFlag || afterRefresh
-            self.forceKeyframeFlag = false
-
-            let start = CFAbsoluteTimeGetCurrent()
-            encoder.encode(pixelBuffer: pixelBuffer, presentationTime: time, forceKeyframe: force)
-            let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
-
-            self.lastEncodeSubmitTime = CFAbsoluteTimeGetCurrent()
-            self.statsLock.lock()
-            self.encodeMillisThisPeriod += elapsed
-            self.statsLock.unlock()
+            // Carried in the flag rather than a local, so a frame the pace
+            // holds back still goes as the keyframe it owes.
+            if afterRefresh { self.forceKeyframeFlag = true }
 
             // Retain, do not copy. The previous version memcpy'd the whole
             // frame four times a second in case the screen went quiet -- 33 MB/s
@@ -734,7 +754,62 @@ final class StreamController: ObservableObject {
             // quarter second out of date, which showed up as the iMac reverting
             // to a stale picture. Holding a reference is free and always current.
             self.lastCapturedBuffer = pixelBuffer
+
+            // Too soon for the client to decode: hold it, and send whatever is
+            // newest when the pace allows. Keyframes are not held; a client
+            // waiting for one shows nothing until it comes.
+            let wait = self.paceInterval - (CFAbsoluteTimeGetCurrent() - self.lastEncodeSubmitTime)
+            if wait > 0 && !self.forceKeyframeFlag {
+                let scheduled = self.deferredFrame != nil
+                self.deferredFrame = (pixelBuffer, time)
+                if !scheduled {
+                    self.encodeQueue.asyncAfter(deadline: .now() + wait) {
+                        guard let frame = self.deferredFrame else { return }
+                        self.deferredFrame = nil
+                        self.encodeCaptured(frame.buffer, frame.time)
+                    }
+                }
+                return
+            }
+            self.deferredFrame = nil
+            self.encodeCaptured(pixelBuffer, time)
         }
+    }
+
+    /// Sends no more frames than the client can decode.
+    ///
+    /// The iMac decodes on its CPU, one frame at a time, and at 49 Mb/s a
+    /// frame of a zoom takes it about 30 ms: 33 a second, against the 45 to 60
+    /// a second a zoom is captured at. Every frame it cannot take breaks the
+    /// chain -- each one is built on the last -- so it has to wait for a
+    /// keyframe, the slowest frame of all to decode, and falls further behind.
+    /// Measured: 370 frames dropped and 110 keyframes requested in 25 seconds
+    /// of zooming, whatever the colour tags or still refresh were set to.
+    /// Sending fewer, complete frames costs some smoothness and none of that.
+    ///
+    /// 15% of headroom over the client's own decode time, never below 12 fps,
+    /// and no pacing at all for a client fast enough for the capture rate.
+    private var paceInterval: Double {
+        guard clientDecodeSeconds > 0, let encoder else { return 0 }
+        let interval = clientDecodeSeconds * 1.15
+        return interval <= 1.0 / Double(encoder.config.frameRate) ? 0 : min(interval, 1.0 / 12.0)
+    }
+
+    /// Encodes one captured frame now. On encodeQueue.
+    private func encodeCaptured(_ pixelBuffer: CVPixelBuffer, _ time: CMTime) {
+        guard let encoder = self.encoder else { return }
+        let force = self.forceKeyframeFlag
+        self.forceKeyframeFlag = false
+        if force { self.lastKeyframeAt = CFAbsoluteTimeGetCurrent() }
+
+        let start = CFAbsoluteTimeGetCurrent()
+        encoder.encode(pixelBuffer: pixelBuffer, presentationTime: time, forceKeyframe: force)
+        let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+
+        self.lastEncodeSubmitTime = CFAbsoluteTimeGetCurrent()
+        self.statsLock.lock()
+        self.encodeMillisThisPeriod += elapsed
+        self.statsLock.unlock()
     }
 
     /// Re-encodes the last captured frame when someone asks for a keyframe and
@@ -959,6 +1034,7 @@ final class StreamController: ObservableObject {
             // timestamps and the latency measurement off.
             let pts = CMClockGetTime(CMClockGetHostTimeClock())
             encoder.encode(pixelBuffer: latest, presentationTime: pts, forceKeyframe: true)
+            self.lastKeyframeAt = CFAbsoluteTimeGetCurrent()
             self.lastEncodeSubmitTime = CFAbsoluteTimeGetCurrent()
         }
         timer.resume()
@@ -998,6 +1074,7 @@ final class StreamController: ObservableObject {
         }
         let pts = CMClockGetTime(CMClockGetHostTimeClock())
         stillEncoder?.encode(pixelBuffer: latest, presentationTime: pts, forceKeyframe: true)
+        lastKeyframeAt = CFAbsoluteTimeGetCurrent()
         stillEncoder?.completeFrames()
         lastEncodeSubmitTime = CFAbsoluteTimeGetCurrent()
         forceKeyframeFlag = false

@@ -1772,6 +1772,45 @@ control may be ignored; it may not be ignored quietly. Both halves were
 confirmed by breaking them: with a setting wired to a constant, and with an
 override applied but not declared, the audit fails in each case.
 
+### The iMac decodes on its CPU, so the host sends what it can decode
+
+On OS X 10.9 the iMac's H.264 decoding runs on the CPU, one frame at a time,
+and its cost follows the bitrate: about 18 ms a frame plus about 14 ms a
+megabit. That makes roughly 17 frames a second sustainable at 49 Mb/s, 36 at
+25, 44 at 15. Zooming or scrolling is captured at 45 to 60.
+
+Before this, every frame the iMac could not take broke the chain -- each is
+built on the one before -- so it had to wait for a keyframe, the slowest frame
+of all to decode, and fell further behind. Measured with the same 25-second
+zoom, the host paced to nothing:
+
+| | decode | dropped | keyframes requested |
+|---|---|---|---|
+| 49 Mb/s, still refresh on | 27 ms | 173 | 69 |
+| 49 Mb/s, still refresh off | 32 ms | 373 | 111 |
+| 49 Mb/s, no colour tags | 31 ms | 372 | 110 |
+| 25 Mb/s | 19 ms | 205 | 72 |
+
+Not the refresh and not the tags: the decoder. That was the lag, and the 130
+Mb/s bursts, nine keyframes a second answering nine requests.
+
+The host now sends no more frames than the client's own decode time allows,
+with 15% to spare; a frame that is too soon waits, and the newest goes when the
+pace allows, so the last frame of a movement is never lost. Keyframes answer
+requests at most every 300 ms. With the same zoom:
+
+| paced | frames a second while zooming | dropped | keyframes requested |
+|---|---|---|---|
+| 49 Mb/s | 11-17 | 12 | 6 |
+| 25 Mb/s, refresh off | 20-30 | 11 | 4 |
+| 25 Mb/s, refresh on | 13-17 | 0 | 0 |
+
+So on this iMac 49 Mb/s cannot be smooth however it is paced, and 25 is the
+setting to use, with the still refresh for detail. The refresh keyframes take
+the iMac 100-200 ms each and inflate the decode time the pace follows, which is
+why the last row is slower; pacing on the client saying when each frame is done
+would not have that problem.
+
 ### Black after a rebuild or an update: macOS's Local Network check
 
 The first launch of a changed host -- every rebuild, and presumably every update

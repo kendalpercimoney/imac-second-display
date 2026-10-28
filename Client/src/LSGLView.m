@@ -13,6 +13,7 @@
 // You should have received a copy of the GNU General Public License along with
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
+#include <dlfcn.h>
 #import "LSGLView.h"
 #include "rtp_protocol.h"
 #import <OpenGL/OpenGL.h>
@@ -129,6 +130,7 @@ static const int kColourCheckPatches[4][3] = {
     /// silenced: the first one, then one line per 300 after it. A fault that
     /// prints sixty times a second on a 2010 iMac is a second fault.
     uint32_t _texImageFailures;
+    uint64_t _lastDiagnosis;
     double _renderMicrosAverage;
     mach_timebase_info_data_t _timebase;
 }
@@ -352,7 +354,11 @@ static const int kColourCheckPatches[4][3] = {
     if (_stripColourTags) {
         CVBufferRemoveAllAttachments(pixelBuffer);
         IOSurfaceRef surface = CVPixelBufferGetIOSurface(pixelBuffer);
-        if (surface) IOSurfaceRemoveAllValues(surface);
+        // Not in the 10.9 SDK, so looked up rather than linked: this is a
+        // test mode, and the function does not exist on the iMac.
+        static void (*removeAll)(IOSurfaceRef);
+        if (!removeAll) removeAll = (void (*)(IOSurfaceRef))dlsym(RTLD_DEFAULT, "IOSurfaceRemoveAllValues");
+        if (surface && removeAll) removeAll(surface);
     }
 
     [_stateLock lock];
@@ -452,6 +458,8 @@ static const int kColourCheckPatches[4][3] = {
         [self drawBuffer:buffer intoViewWidth:viewWidth height:viewHeight cgl:cgl];
         [self drawCursorIntoViewWidth:viewWidth height:viewHeight forBuffer:buffer];
     }
+
+    if (_diagnose && buffer) [self diagnose:buffer viewWidth:viewWidth height:viewHeight];
 
     if (_pendingSnapshotPath) {
         // Has to happen before the swap: after flushBuffer the back buffer
@@ -600,20 +608,36 @@ static const int kColourCheckPatches[4][3] = {
 /// to be.
 ///
 /// `-colourPath builtin` or `-colourPath shader` forces one, for testing.
+/// `-colourCheck NO` skips the check and uses the built-in conversion, as
+/// every client before the check did.
+///
+/// Each step is logged before it runs. The check has only ever run on current
+/// Macs; if a 2010 driver stops dead in one of these calls, the last line in
+/// system.log says which.
 - (void)checkColourIfNeeded:(CGLContextObj)cgl like:(CVPixelBufferRef)frame {
     if (_colourChecked) return;
     _colourChecked = YES;
 
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults objectForKey:@"colourCheck"] && ![defaults boolForKey:@"colourCheck"]) {
+        _useColourShader = NO;
+        NSLog(@"[LanScreen] colour check: skipped, as asked; using the built-in conversion");
+        return;
+    }
+
+    NSLog(@"[LanScreen] colour check: copying the first frame's colour tags");
     CVPixelBufferRef check = [self colourCheckBuffer];
     if (check && frame) {
         CVBufferRemoveAllAttachments(check);
         CVBufferPropagateAttachments(frame, check);
     }
 
-    NSString *forced = [[[NSUserDefaults standardUserDefaults] stringForKey:@"colourPath"]
-                        lowercaseString];
+    NSString *forced = [[defaults stringForKey:@"colourPath"] lowercaseString];
+    NSLog(@"[LanScreen] colour check: building the BT.709 shader");
     BOOL shaderUsable = [self prepareColourShader];
+    NSLog(@"[LanScreen] colour check: measuring the built-in conversion");
     int builtIn = [self measureColour:NO cgl:cgl];
+    NSLog(@"[LanScreen] colour check: measuring the shader%@", shaderUsable ? @"" : @" (not available)");
     int shader = shaderUsable ? [self measureColour:YES cgl:cgl] : 255;
 
     if ([forced isEqualToString:@"shader"] && shaderUsable) {
@@ -642,6 +666,40 @@ static const int kColourCheckPatches[4][3] = {
               @"nothing here could do better (the shader is %@)", _colourError,
               shaderUsable ? @"no closer" : @"not available on this driver");
     }
+}
+
+/// Reads the decoded frame's centre on the CPU and the back buffer's centre
+/// with glReadPixels, before the swap, and logs both. At most every five
+/// seconds: locking a decoded surface and reading back stall the GPU.
+- (void)diagnose:(CVPixelBufferRef)buffer viewWidth:(GLsizei)viewWidth height:(GLsizei)viewHeight {
+    uint64_t now = mach_absolute_time();
+    double sinceLast = (double)(now - _lastDiagnosis) * (double)_timebase.numer / (double)_timebase.denom;
+    if (_lastDiagnosis != 0 && sinceLast < 5e9) return;
+    _lastDiagnosis = now;
+
+    NSString *decoded = @"not readable";
+    OSType format = CVPixelBufferGetPixelFormatType(buffer);
+    size_t width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer);
+    if (CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
+        const uint8_t *base = CVPixelBufferGetBaseAddress(buffer);
+        size_t stride = CVPixelBufferGetBytesPerRow(buffer);
+        if (base && format == kCVPixelFormatType_422YpCbCr8) {
+            const uint8_t *p = base + (height / 2) * stride + ((width / 2) & ~(size_t)1) * 2;
+            decoded = [NSString stringWithFormat:@"Cb %u Y %u Cr %u", p[0], p[1], p[2]];
+        } else if (base && format == kCVPixelFormatType_32BGRA) {
+            const uint8_t *p = base + (height / 2) * stride + (width / 2) * 4;
+            decoded = [NSString stringWithFormat:@"RGB %u %u %u", p[2], p[1], p[0]];
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
+    }
+    uint8_t drawn[4] = {0};
+    glReadPixels(viewWidth / 2, viewHeight / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, drawn);
+    GLenum glError = glGetError();
+    NSLog(@"[LanScreen] diagnose: frame %zux%zu, centre decoded %@, drawn RGB %u %u %u; "
+          @"view %dx%d, %@, texture failures %u, frames drawn %u, GL error 0x%x",
+          width, height, decoded, drawn[0], drawn[1], drawn[2], viewWidth, viewHeight,
+          _useColourShader ? @"BT.709 shader" : @"built-in conversion",
+          _texImageFailures, _framesDrawn, glError);
 }
 
 - (uint32_t)colourFlags {

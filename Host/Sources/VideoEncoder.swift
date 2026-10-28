@@ -242,10 +242,15 @@ final class VideoEncoder {
         // Say what the stream is. Until now it carried no colour information
         // at all, so every decoder had to guess, and a 2010 iMac's guess is the
         // standard-definition matrix. Primaries and matrix are BT.709, which is
-        // what sRGB content captured with BT.709 is; the transfer is sRGB's own
-        // curve, which is what the pixels were captured in; range is video.
+        // what sRGB content captured with BT.709 is; range is video.
+        //
+        // No transfer function, though the pixels are in sRGB's curve. Tagged
+        // sRGB -- transfer_characteristics 13 in the stream's header -- OS X
+        // 10.9's decoder refuses every frame as bad data (-8969), which on the
+        // iMac was a black screen and a keyframe request after each refusal.
+        // Without it, it decodes. The client converts with the matrix alone, so
+        // the transfer tag was never used for anything there.
         set(session, kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2)
-        set(session, kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_sRGB)
         set(session, kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         set(session, kVTCompressionPropertyKey_ExpectedFrameRate,
             config.expectedFrameRateOverride ?? config.frameRate)

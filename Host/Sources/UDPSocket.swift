@@ -14,6 +14,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 
 import Foundation
+import OSLog
 import Darwin
 
 enum UDPError: LocalizedError {
@@ -95,6 +96,10 @@ final class UDPSender {
     /// symptom is a blocky picture with the client reporting no loss at all,
     /// because from its side nothing was ever sent.
     private(set) var dropped: UInt64 = 0
+    /// The errno of the most recent packet the kernel refused outright, and
+    /// whether any packet has ever gone out on this socket.
+    private(set) var lastFailure: Int32 = 0
+    private(set) var hasSent = false
 
     /// Returns bytes sent, or -1. ENOBUFS is retried a few times: it means the
     /// interface queue is momentarily full, not that anything is broken.
@@ -103,7 +108,7 @@ final class UDPSender {
         var attempts = 0
         while true {
             let n = Darwin.send(fd, bytes, count, 0)
-            if n >= 0 { return n }
+            if n >= 0 { hasSent = true; return n }
             if errno == EINTR { continue }
             if errno == ENOBUFS || errno == EAGAIN {
                 attempts += 1
@@ -111,6 +116,11 @@ final class UDPSender {
                 usleep(50)
                 continue
             }
+            if lastFailure == 0 {
+                Logger(subsystem: "com.lanscreen.host", category: "network").notice(
+                    "send refused: errno \(errno, privacy: .public) (\(String(cString: strerror(errno)), privacy: .public))")
+            }
+            lastFailure = errno
             dropped &+= 1
             return -1
         }

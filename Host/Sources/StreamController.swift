@@ -127,6 +127,9 @@ final class StreamController: ObservableObject {
     /// what a revoked Screen Recording grant looks like, and retrying that
     /// forever would be worse than the freeze it is meant to fix.
     private var shortLivedResumes = 0
+    /// Set once this instance has decided to relaunch; see
+    /// restartAfterNetworkRefusal.
+    private var relaunchingForNetwork = false
     /// When the current stream started, so the log lines carry an elapsed time
     /// rather than only a wall clock.
     private var startedAt: Date?
@@ -542,7 +545,8 @@ final class StreamController: ObservableObject {
                                 frameRate: plan.frameRate,
                                 showsCursor: plan.capturesCursor,
                                 useYUV420: plan.capturesYUV420,
-                                capturesAudio: plan.sendsAudio)
+                                capturesAudio: plan.sendsAudio,
+                                exactDisplay: settings.source == .virtualDisplay)
 
         startClientSettingsUpdates(control: control)
 
@@ -1017,8 +1021,9 @@ final class StreamController: ObservableObject {
     }
 
     private func tickStats() {
-        let (bytes, drops) = encodeQueue.sync {
-            (self.packetizer?.bytesSent ?? 0, self.sender?.dropped ?? 0)
+        let (bytes, drops, hasSent, failure) = encodeQueue.sync {
+            (self.packetizer?.bytesSent ?? 0, self.sender?.dropped ?? 0,
+             self.sender?.hasSent ?? false, self.sender?.lastFailure ?? 0)
         }
 
         statsLock.lock()
@@ -1035,6 +1040,9 @@ final class StreamController: ObservableObject {
         statsLock.unlock()
 
         onMain {
+            if !hasSent && drops > 0 && failure == EPIPE {
+                self.restartAfterNetworkRefusal()
+            }
             self.outgoingMbps = Double(delta) * 8.0 / 1_000_000.0
             self.packetsNotSent = drops
             self.encodedFPS = Double(frames)
@@ -1044,6 +1052,42 @@ final class StreamController: ObservableObject {
             }
             self.logStatsLine()
         }
+    }
+
+    /// The first launch after the app changes -- a rebuild, an update -- can
+    /// have every packet refused with EPIPE, for the whole run, and the iMac
+    /// stays black. macOS's Local Network privacy check keys on the binary,
+    /// forgets a changed one, and only re-learns it a few seconds after launch:
+    /// "Local network allowed by preference ... but received prompt. Clearing
+    /// cached UUIDs and restarting session." What it re-learns applies to
+    /// processes started afterwards. Fresh sockets in this one stay refused --
+    /// measured: three restarts of the stream over twenty seconds, every packet
+    /// still EPIPE -- and the next launch always worked.
+    ///
+    /// So a stream that has never got a packet out, and is being refused with
+    /// EPIPE, relaunches the app once and carries on streaming. If the new
+    /// launch is refused too, Local Network really is off, and it says so
+    /// rather than relaunching for ever.
+    private func restartAfterNetworkRefusal() {
+        guard isRunning, !relaunchingForNetwork else { return }
+        if ProcessInfo.processInfo.arguments.contains("--relaunched-for-network") {
+            lastError = "macOS is not letting LanScreen send to the iMac. Check "
+                + "System Settings › Privacy & Security › Local Network, then press Start."
+            stop()
+            return
+        }
+        relaunchingForNetwork = true
+        StreamController.statsLog.notice("every packet refused (EPIPE) on first launch; relaunching")
+        stop()
+        // After a second, so this instance has let go of its virtual display
+        // and the control port before the next one claims them. A shell rather
+        // than NSWorkspace, because this process has to be gone by then.
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "sleep 1; /usr/bin/open -n \"$0\" --args --autostart --relaunched-for-network",
+                          Bundle.main.bundlePath]
+        try? task.run()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
     }
 
     /// A line a second to the system log, so "it got slower after a few

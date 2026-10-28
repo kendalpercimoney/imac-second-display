@@ -68,6 +68,7 @@
 
     NSString *_snapshotPath;
     uint32_t  _snapshotAfter;
+    uint32_t  _diagnoseTicks;
     NSTimer  *_snapshotTimer;
     NSTimer  *_tickTimer;
     uint64_t  _bytesAtLastTick;
@@ -99,6 +100,7 @@
     [self readConfiguration];
     [self buildMenu];
     [self buildWindow];
+    _glView.diagnose = [[NSUserDefaults standardUserDefaults] boolForKey:@"diagnose"];
     [self startPipeline];
 
     _tickTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
@@ -141,7 +143,8 @@
         @"windowed"    : @NO,
         @"vsync"       : @NO,
         @"stats"       : @NO,
-        @"snapshotAfter" : @40
+        @"snapshotAfter" : @40,
+        @"diagnose"    : @NO
     }];
 
     _hostAddress  = [defaults stringForKey:@"host"];
@@ -559,6 +562,16 @@
             stats.audio_buffered_us = (uint32_t)([_audioPlayer bufferedMilliseconds] * 1000.0);
         }
         [_control sendStats:&stats];
+
+        if (_glView.diagnose && ++_diagnoseTicks % 5 == 0) {
+            NSLog(@"[LanScreen] diagnose: packets %u, lost %u, corrupt %u, decoded %u, "
+                  @"dropped %u, queue %u, decode %.2f ms, render %.2f ms, first frame %@",
+                  [_depacketizer packetsReceived], [_depacketizer packetsLost],
+                  [_depacketizer framesCorrupt], [_decoder framesDecoded],
+                  [_decoder framesDropped], [_decoder queueDepth],
+                  [_decoder decodeMicroseconds] / 1000.0, [_glView renderMicroseconds] / 1000.0,
+                  _sawFirstFrame ? @"yes" : @"no");
+        }
 
         // Until video shows up, keep saying hello. The host resends its
         // parameter sets and forces an IDR every time it hears one, so a client

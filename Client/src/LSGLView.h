@@ -68,6 +68,12 @@
 /// error measured on the conversion in use. Zero until the first frame.
 - (uint32_t)colourFlags;
 
+/// -diagnose YES: every five seconds, log the centre of the newest decoded
+/// frame and of what was drawn from it, and how it was drawn. Says on its own
+/// which side a black screen comes from: a black picture decoded, or a good
+/// picture drawn black.
+@property (nonatomic, assign) BOOL diagnose;
+
 /// The longest a single pointer update has taken to hand over.
 ///
 /// This is the invariant that matters for how the pointer feels: a thread

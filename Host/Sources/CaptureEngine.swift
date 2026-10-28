@@ -15,6 +15,7 @@
 
 import Foundation
 import ScreenCaptureKit
+import OSLog
 import CoreMedia
 import CoreVideo
 import AudioToolbox
@@ -58,9 +59,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// - Parameter exactDisplay: capture `displayID` or nothing. Without it, a
+    ///   display that is not listed falls back to the first one that is, which
+    ///   suits a saved display that has since been unplugged.
     func start(displayID: UInt32, width: Int, height: Int,
                frameRate: Int, showsCursor: Bool, useYUV420: Bool = true,
-               capturesAudio: Bool = false) async throws {
+               capturesAudio: Bool = false, exactDisplay: Bool = false) async throws {
         // Retried, because the answer right after this Mac wakes is wrong
         // rather than final. The window server has not finished republishing
         // displays, so SCShareableContent returns an empty list -- or throws --
@@ -73,8 +77,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
             do {
                 let content = try await SCShareableContent.excludingDesktopWindows(
                     false, onScreenWindowsOnly: false)
+                // Never a stand-in for a display this process just created:
+                // until the window server lists it, "the first display" is
+                // this Mac's own screen, or the previous run's virtual display
+                // on its way out. Better to keep waiting, then fail and say so.
                 if let found = content.displays.first(where: { $0.displayID == displayID })
-                            ?? content.displays.first {
+                            ?? (exactDisplay ? nil : content.displays.first) {
                     display = found
                     break
                 }
@@ -92,6 +100,11 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
                     + " happening, check Screen Recording in System Settings."
             ])
         }
+
+        // One line per stream start: which display was asked for, and which one
+        // is being captured.
+        Logger(subsystem: "com.lanscreen.host", category: "capture").notice(
+            "capturing display \(display.displayID, privacy: .public) (asked for \(displayID, privacy: .public))")
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
 
@@ -141,7 +154,19 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         try await stream.startCapture()
         self.stream = stream
+
+        // What the first three seconds delivered, by kind: the first thing to
+        // rule out when the iMac is black. When it was, after a rebuild,
+        // capture was delivering fine and the packets were being refused.
+        outputQueue.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }
+            Logger(subsystem: "com.lanscreen.host", category: "capture").notice(
+                "first 3 s: \(self.framesComplete, privacy: .public) complete, \(self.framesIdle, privacy: .public) idle, \(self.framesOther, privacy: .public) other")
+        }
     }
+
+    // Counted on outputQueue, where frames arrive.
+    private var framesComplete = 0, framesIdle = 0, framesOther = 0
 
     func stop() async {
         guard let stream else { return }
@@ -166,8 +191,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
                 sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let info = attachments.first,
               let rawStatus = info[.status] as? Int,
-              let status = SCFrameStatus(rawValue: rawStatus),
-              status == .complete else { return }
+              let status = SCFrameStatus(rawValue: rawStatus) else { framesOther += 1; return }
+        switch status {
+        case .complete: framesComplete += 1
+        case .idle: framesIdle += 1; return
+        default: framesOther += 1; return
+        }
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         onFrame?(pixelBuffer, CMSampleBufferGetPresentationTimeStamp(sampleBuffer))

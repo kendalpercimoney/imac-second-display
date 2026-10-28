@@ -380,6 +380,7 @@ defaults write com.lanscreen.client host 10.0.0.1
 | `stats` | `NO` | Show the statistics overlay |
 | `pixelFormat` | auto | `2vuy` or `bgra` |
 | `colourCheck` | `YES` | `NO` skips the colour self-check and uses the driver's conversion |
+| `diagnose` | `NO` | `YES` logs, every 5 s, the centre pixel of the decoded frame and of what was drawn, plus packet and decode counts |
 
 ### Client keys
 
@@ -982,14 +983,20 @@ and falls back to BT.601 when there is none: 14 code values too green on a leaf,
 17 at worst end to end. Whether 10.9 tags its frames, and whether a 2010
 graphics driver reads the tag, could not be checked from here. So now:
 
-- The stream says what it is: BT.709 matrix and primaries, sRGB transfer, video
-  range.
+- The stream says what it is: BT.709 matrix and primaries, video range. Not its
+  transfer curve: OS X 10.9's decoder refuses every frame of a stream tagged
+  with sRGB's (`transfer_characteristics` 13) as bad data, error -8969, which on
+  the iMac was a black screen. The client never used that tag anyway.
 - The client **checks itself** on the first frame: it draws four mid-tones
   through its own conversion, with the real frame's tags, reads the pixels back
   and compares them with what BT.709 says they should be. If the built-in
   conversion is off, it switches to a small shader that does the BT.709 maths
   itself. It logs what it found, and the panel says so only if neither could be
   made right.
+
+On the iMac itself it measured both: 10.9's built-in conversion is 14 code
+values off, so it does not follow the tags, and the shader is within 1. So the
+iMac converts with the shader, and this check is what made its colours right.
 
 `./Tests/run_colour_test.sh` checks twelve mid-tone patches end to end, to
 within 4 code values, four ways: tagged frames, the shader forced, untagged
@@ -1764,6 +1771,29 @@ either changes the plan the pipeline is built from, or is named as inert. A
 control may be ignored; it may not be ignored quietly. Both halves were
 confirmed by breaking them: with a setting wired to a constant, and with an
 override applied but not declared, the audit fails in each case.
+
+### Black after a rebuild or an update: macOS's Local Network check
+
+The first launch of a changed host -- every rebuild, and presumably every update
+-- sometimes had every packet it sent to the iMac refused with EPIPE, for the
+whole run, while capture and encoding carried on normally: 136 frames captured
+in the first three seconds, 69 KB sent in ten. macOS's Local Network privacy
+check keys on the binary itself. It forgets a changed one and re-learns it a
+few seconds after launch ("Local network allowed by preference ... but received
+prompt. Clearing cached UUIDs and restarting session"), and what it re-learns
+applies to processes started afterwards. Fresh sockets in the same process
+stayed refused through three stream restarts over twenty seconds; the next
+launch always worked.
+
+So a stream that has never got a packet out and is being refused with EPIPE
+relaunches the app once, and carries on streaming about ten seconds later. If
+the relaunched copy is refused too, Local Network really is off, and the panel
+says to check it rather than relaunching for ever.
+
+Two other suspects were ruled out on the way. Screen Recording was granted every
+time (tccd: authValue 2), and capture attached to the right display every time.
+Finding this took one more thing worth knowing: in zsh, `log` is a built-in, so
+`log show` there runs the wrong program and prints nothing. Use `/usr/bin/log`.
 
 ## Verifying it
 

@@ -252,12 +252,10 @@ struct SettingsView: View {
     private var networkSection: some View {
         GroupBox("Network") {
             VStack(alignment: .leading, spacing: 8) {
-                Picker("Packet size", selection: $settings.mtuPayload) {
-                    Text("1400 B — standard 1500 MTU").tag(Int(LS_DEFAULT_MTU_PAYLOAD))
-                    Text("8900 B — jumbo frames (MTU 9000 on both ends)").tag(Int(LS_JUMBO_MTU_PAYLOAD))
-                }
-                .disabled(controller.isRunning)
-
+                // No packet size choice any more: the only alternative was
+                // jumbo frames, and neither end can carry them. The iMac's
+                // Ethernet needs a third-party kext for an MTU above 1500, and
+                // a USB adapter on Apple silicon is held to 1500 by macOS.
                 if controller.linkMTUBytes > 0 { linkMTUNote }
                 inertNote("Packet size")
 

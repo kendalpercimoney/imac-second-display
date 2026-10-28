@@ -157,15 +157,13 @@ working — only 10.0.0.x traffic uses the cable.
 
 Confirm with `ping -c3 10.0.0.2` from the host.
 
-### Optional: jumbo frames
+### No jumbo frames
 
-Fewer, larger packets means less per-packet overhead on the old machine's NIC.
-Set **MTU: Custom 9000** under Network ▸ Ethernet ▸ Advanced ▸ Hardware on both
-machines, then pick the 8900-byte option in the host UI.
-
-Check your USB-C adapter supports it first — many cap at 4000 or ignore the
-setting, and a mismatched MTU shows up as everything working until the first
-keyframe, then nothing.
+Leave the MTU at 1500 on both machines. Jumbo frames are not available on this
+pair: the iMac's built-in Ethernet needs a third-party kext for an MTU above
+1500, and a USB Ethernet adapter on an Apple silicon Mac is held to 1500 by
+macOS. The host used to offer an 8900-byte packet size; it no longer does, and
+if a larger size is ever configured it cuts packets to what the link carries.
 
 ### Optional: bigger socket buffers on the iMac
 
@@ -381,6 +379,7 @@ defaults write com.lanscreen.client host 10.0.0.1
 | `vsync` | `NO` | Wait for vblank (cleaner, ~1 refresh slower) |
 | `stats` | `NO` | Show the statistics overlay |
 | `pixelFormat` | auto | `2vuy` or `bgra` |
+| `colourCheck` | `YES` | `NO` skips the colour self-check and uses the driver's conversion |
 
 ### Client keys
 
@@ -492,7 +491,6 @@ Measured on a static 1920×1080 desktop, encoding with the real settings:
 |---|---|
 | **A still screen now sends nothing** | Was 4.03 Mb/s and a full IDR decode every second. Now zero. Free — already done |
 | **Keyframe interval 2s → 10s** | 73% less data on a nearly-still screen, and that many fewer decode spikes. Default is 5s |
-| **Jumbo frames** | At 25 Mb/s, 1400-byte packets mean ~2,250 `recv` calls and interrupts per second on the iMac. 8900-byte packets cut that to ~350 |
 | **1080p → 720p** | Roughly half the pixels to decode. The single biggest lever if the iMac is struggling |
 | **60 → 30 fps** | Halves both encode and decode work |
 | **Lower bitrate** | Less to parse, less to decode, fewer packets |
@@ -1665,9 +1663,9 @@ happening: 921,196 fragments created from 153,943 datagrams, almost exactly the
 six-way split an 8900 B payload takes on a 1500 B link, and zero while idle.
 
 The host now asks the interface that routes to the client what it can carry, and
-uses the smaller of that and the configured size. It says so in the panel and in
-the log rather than changing the saved setting, so restoring MTU 9000 on both
-ends brings jumbo frames back on its own.
+uses the smaller of that and the configured size. The 8900-byte option has
+since been removed altogether: neither the iMac's port nor a USB adapter on
+Apple silicon can carry jumbo frames.
 
 Start the host with `LS_LOG=1` and it also writes a line a second of throughput,
 latency, loss and keyframe counts, because nothing else keeps a history and by

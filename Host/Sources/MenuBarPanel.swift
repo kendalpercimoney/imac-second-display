@@ -230,8 +230,6 @@ struct MenuBarPanel: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if jumboAvailable { jumboHint }
-
             if let off = colourError, off > 4 {
                 // The client measures its own colour conversion and switches to
                 // an exact one if the built-in one is wrong, so this only shows
@@ -293,48 +291,6 @@ struct MenuBarPanel: View {
     private var level42Ceiling: Int {
         StreamPlan.level42MaxBitsPerSecond(controller.plan?.profile
             ?? (settings.profile == .high ? .high : .baseline))
-    }
-
-    /// Whether the configured packet size is being cut down to fit the link,
-    /// which is the only situation in which raising the MTU would change
-    /// anything.
-    private var jumboAvailable: Bool {
-        controller.isRunning
-            && controller.effectiveMTUPayload > 0
-            && controller.effectiveMTUPayload != settings.mtuPayload
-    }
-
-    /// Jumbo frames are a property of the cable and both machines, not of this
-    /// app, so the app cannot turn them on. It can at least say exactly what to
-    /// type, on which interface, rather than leaving "Packet 1472 B" in red
-    /// with no way to act on it.
-    private var jumboHint: some View {
-        HStack(spacing: 6) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text("For the full \(String(settings.mtuPayload)) B, on both machines:")
-                    .font(.system(size: 9))
-                    .foregroundStyle(Aero.inkFaint)
-                Text(jumboCommand)
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(Aero.ink)
-                    .textSelection(.enabled)
-                    .lineLimit(1).minimumScaleFactor(0.8)
-            }
-            Spacer(minLength: 0)
-            Button("Copy") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(jumboCommand, forType: .string)
-            }
-            .buttonStyle(AeroButtonStyle())
-            .controlSize(.small)
-        }
-        .padding(.horizontal, 6).padding(.vertical, 4)
-        .padding(.top, 4)
-    }
-
-    private var jumboCommand: String {
-        let name = controller.linkInterfaceName.isEmpty ? "en0" : controller.linkInterfaceName
-        return "sudo ifconfig \(name) mtu 9000"
     }
 
     private func readout(_ label: String, _ value: String, alarm: Bool = false) -> some View {

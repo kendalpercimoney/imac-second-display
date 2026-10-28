@@ -42,12 +42,23 @@ cp "$BIN" "$APP/Contents/MacOS/LanScreenHost"
 cp "$ROOT/Host/Info.plist" "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-# Ad-hoc signature. TCC keys its Screen Recording grant on the code signature,
-# so re-signing after a rebuild can make macOS forget the permission. If the
-# app stops seeing displays after a rebuild, remove it from
-# System Settings > Privacy & Security > Screen Recording and add it again.
-echo "==> codesign (ad-hoc)"
-codesign --force --sign - --timestamp=none "$APP"
+# Signed with an Apple Development certificate when this Mac has one, ad-hoc
+# otherwise. It decides whether Screen Recording and Accessibility survive a
+# rebuild. macOS keys those grants on the signature's designated requirement:
+# an ad-hoc signature's is the hash of this exact binary, so every rebuild is
+# a new app to it, the old grant matches nothing, and it asks again -- for ever,
+# if the copy being granted is not the copy being run. A certificate's is "this
+# bundle identifier, signed by this team", which the next build meets too.
+# LS_SIGN_IDENTITY picks a different certificate; "-" forces ad-hoc.
+IDENTITY="${LS_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Apple Development|Developer ID Application/{print $2; exit}')}"
+if [ -n "$IDENTITY" ] && [ "$IDENTITY" != "-" ]; then
+    echo "==> codesign ($IDENTITY)"
+    codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
+else
+    echo "==> codesign (ad-hoc: Screen Recording will have to be granted again after every rebuild)"
+    codesign --force --sign - --timestamp=none "$APP"
+fi
 
 echo
 echo "Built: $APP"

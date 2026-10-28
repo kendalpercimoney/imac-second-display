@@ -73,11 +73,14 @@ if [ ! -f "$BIN" ]; then
     echo "error: no client at $CLIENT -- build it on the iMac with ./Client/build.sh" >&2
     exit 1
 fi
-if ! file "$BIN" | grep -q "Mach-O.*x86_64"; then
-    echo "error: $BIN is not an x86_64 Mach-O binary" >&2
-    exit 1
-fi
-MINOS="$(otool -l "$BIN" | awk '/LC_VERSION_MIN_MACOSX/{f=1} f&&/version/{print $2; exit}')"
+# Every check below matches text it has already captured. Under pipefail,
+# `command | grep -q` can fail on a match -- grep stops reading, the command
+# dies of SIGPIPE -- and here that would wave a certificate through.
+case "$(file "$BIN")" in
+    *Mach-O*x86_64*) ;;
+    *) echo "error: $BIN is not an x86_64 Mach-O binary" >&2; exit 1 ;;
+esac
+MINOS="$(otool -l "$BIN" | awk '/LC_VERSION_MIN_MACOSX/{f=1} f&&/version/&&!v{v=$2} END{print v}')"
 if [ "$MINOS" != "10.9" ]; then
     echo "error: the client's deployment target is ${MINOS:-unknown}, not 10.9 -- was it built on the iMac?" >&2
     exit 1
@@ -120,9 +123,14 @@ clean() {   # clean <what> <path>...
     local what="$1" i dirty=0
     shift
     for ((i = 0; i < ${#NEEDLES[@]}; i++)); do
-        if LC_ALL=C grep -r -q -a -i -F -e "${NEEDLES[$i]}" "$@"; then
+        local status=0
+        LC_ALL=C grep -r -q -a -i -F -e "${NEEDLES[$i]}" "$@" || status=$?
+        if [ $status -eq 0 ]; then
             echo "error: ${LABELS[$i]} is in $what:" >&2
             LC_ALL=C grep -r -l -a -i -F -e "${NEEDLES[$i]}" "$@" | sed 's/^/       /' >&2
+            dirty=1
+        elif [ $status -ne 1 ]; then
+            echo "error: could not search $what" >&2
             dirty=1
         fi
     done
@@ -130,13 +138,16 @@ clean() {   # clean <what> <path>...
 }
 
 for app in "$STAGE"/*.app; do
-    if codesign -dv --verbose=2 "$app" 2>&1 | grep -q '^Authority='; then
-        echo "error: $(basename "$app") is signed with a certificate, which names its owner" >&2
-        exit 1
-    fi
+    case "$(codesign -dv --verbose=2 "$app" 2>&1 || true)" in
+        *Authority=*)
+            echo "error: $(basename "$app") is signed with a certificate, which names its owner" >&2
+            exit 1 ;;
+    esac
 done
-codesign -dv "$STAGE/LanScreenHost.app" 2>&1 | grep -q '^Signature=adhoc' \
-    || { echo "error: the host is not signed ad-hoc" >&2; exit 1; }
+case "$(codesign -dv "$STAGE/LanScreenHost.app" 2>&1)" in
+    *Signature=adhoc*) ;;
+    *) echo "error: the host is not signed ad-hoc" >&2; exit 1 ;;
+esac
 clean "the apps" "$STAGE" || exit 1
 
 # -------------------------------------------------------------------- the zips --
@@ -154,7 +165,7 @@ clean "the zips" "$OUT"/*.zip "$UNZIPPED" || exit 1
 
 HOST_BIN="$UNZIPPED/LanScreenHost.app/Contents/MacOS/LanScreenHost"
 HOST_ARCHS="$(lipo -archs "$HOST_BIN" | sed 's/ /, /g')"
-HOST_MINOS="$(otool -l "$HOST_BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
+HOST_MINOS="$(otool -l "$HOST_BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/&&!v{v=$2} END{print v}')"
 rm -rf "$UNZIPPED" "$STAGE"
 
 sum() { shasum -a 256 "$1" | cut -d' ' -f1; }

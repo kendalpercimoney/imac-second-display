@@ -74,9 +74,7 @@ final class RTPPacketizer {
 
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
 
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let rtpTimestamp = UInt32(truncatingIfNeeded:
-            Int64((pts.seconds * Double(LS_RTP_CLOCK_HZ)).rounded()))
+        let rtpTimestamp = Self.rtpTimestamp(for: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
 
         let isKeyframe = Self.isKeyframe(sampleBuffer)
 
@@ -185,6 +183,13 @@ final class RTPPacketizer {
     }
 
     // MARK: - helpers
+
+    /// The RTP timestamp a frame with this presentation time goes out with. The
+    /// one definition, because the client echoes it back in DECODED and the
+    /// host has to recognise it.
+    static func rtpTimestamp(for pts: CMTime) -> UInt32 {
+        UInt32(truncatingIfNeeded: Int64((pts.seconds * Double(LS_RTP_CLOCK_HZ)).rounded()))
+    }
 
     static func isKeyframe(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(

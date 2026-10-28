@@ -59,6 +59,11 @@ let colourPatches: [(r: UInt8, g: UInt8, b: UInt8)] = [
     (220, 200,  60), (120,  60, 160), (230, 140,  40), (110,  80,  50),
 ]
 
+/// Saturated colours for the "stripes" pattern; Tests/checkchroma.m has the same list.
+let stripeColours: [(r: UInt8, g: UInt8, b: UInt8)] = [
+    (220, 40, 40), (40, 180, 60), (50, 80, 220), (230, 200, 40), (200, 60, 200), (40, 190, 200),
+]
+
 let arguments = CommandLine.arguments
 let host = arguments.count > 1 ? arguments[1] : "127.0.0.1"
 let port = UInt16(arguments.count > 2 ? arguments[2] : "5000") ?? 5000
@@ -93,6 +98,22 @@ func makeFrame(_ index: Int) -> CVPixelBuffer {
     CVPixelBufferLockBaseAddress(pixelBuffer, [])
     let stride = CVPixelBufferGetBytesPerRow(pixelBuffer)
     let base = CVPixelBufferGetBaseAddress(pixelBuffer)!.assumingMemoryBound(to: UInt8.self)
+
+    if pattern == "stripes" {
+        // Three-pixel bands of saturated colours, so colour edges land on odd
+        // and even pixels alike: what an app icon looks like to the chroma
+        // reconstruction. Tests/checkchroma.m holds the same rule.
+        for y in 0..<height {
+            let row = base + y * stride
+            for x in 0..<width {
+                let c = stripeColours[(x / 3) % stripeColours.count]
+                let p = row + x * 4
+                p[0] = c.b; p[1] = c.g; p[2] = c.r; p[3] = 255
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+        return pixelBuffer
+    }
 
     if pattern == "patches" {
         for y in 0..<height {

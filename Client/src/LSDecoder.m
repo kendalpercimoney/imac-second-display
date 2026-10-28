@@ -77,6 +77,11 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
     /// 60 Hz on this hardware is its own problem. First failure, then one line
     /// per 300, so the record survives without becoming the bottleneck.
     uint32_t _decodeFailures;
+    /// -decodeDelayMs and -decodeDelayPerMbitMs, for testing only: added to
+    /// every decode, so a fast Mac can stand in for the iMac's CPU decoder,
+    /// which measured about 18 ms a frame plus 14 ms a megabit.
+    useconds_t _testDelayMicros;
+    double _testDelayMicrosPerByte;
 }
 
 - (id)init {
@@ -86,6 +91,11 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
         // to pay back later -- and the queue refuses, rather than corrupts,
         // whatever does not fit.
         _queue = [[LSDecodeQueue alloc] initWithDepth:2];
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        NSInteger delay = [defaults integerForKey:@"decodeDelayMs"];
+        _testDelayMicros = delay > 0 ? (useconds_t)(delay * 1000) : 0;
+        double perMbit = [defaults doubleForKey:@"decodeDelayPerMbitMs"];
+        _testDelayMicrosPerByte = perMbit > 0 ? perMbit * 1000.0 * 8.0 / 1e6 : 0;
         pthread_mutex_init(&_mutex, NULL);
         pthread_cond_init(&_cond, NULL);
         mach_timebase_info(&_timebase);
@@ -187,6 +197,8 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
         @autoreleasepool {
             [self decodeUnit:unit];
         }
+        void (^done)(uint32_t) = self.frameDone;
+        if (done) done(unit.timestamp);
     }
 }
 
@@ -343,6 +355,9 @@ static void lsDecoderOutputCallback(void *decompressionOutputRefCon,
     status = VTDecompressionSessionDecodeFrame(_session, sampleBuffer,
                                                0, NULL, &infoFlags);
     CFRelease(sampleBuffer);
+    if (_testDelayMicros || _testDelayMicrosPerByte > 0) {
+        usleep(_testDelayMicros + (useconds_t)(_testDelayMicrosPerByte * (double)[unit.avcc length]));
+    }
 
     uint64_t elapsed = mach_absolute_time() - begin;
     double micros = (double)elapsed * (double)_timebase.numer

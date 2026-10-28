@@ -58,6 +58,10 @@
 /// or a frame the decoder rejected -- and again for every frame refused until
 /// one arrives. Fires on whichever thread submitted the frame.
 @property (nonatomic, copy) void (^keyframeNeeded)(void);
+
+/// Called on the decode thread after every frame the decoder has finished
+/// with, decoded or not, with its RTP timestamp: the decoder is free again.
+@property (nonatomic, copy) void (^frameDone)(uint32_t timestamp);
 @property (nonatomic, readonly) uint32_t decodeMicroseconds;       // rolling average
 @property (nonatomic, readonly) uint32_t decodeMicrosecondsLast;
 @property (nonatomic, readonly) uint32_t decodeMicrosecondsPeak;

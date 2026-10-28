@@ -208,7 +208,13 @@ enum {
     LS_MSG_INPUT_STATE  = 17,
     /* host -> client: whether input will be acted on, so the client does not
      * take the iMac's mouse away from it for nothing. */
-    LS_MSG_INPUT_STATUS = 18
+    LS_MSG_INPUT_STATUS = 18,
+    /* client -> host: the decoder has finished with the frame carrying this
+     * RTP timestamp, successfully or not, and is free for the next. The iMac
+     * decodes on its CPU, one frame at a time, at a speed that depends on how
+     * big each frame is; this lets the host send the next frame the moment it
+     * can be decoded and never before, instead of guessing from an average. */
+    LS_MSG_DECODED      = 19
 };
 
 /* Volume is carried as thousandths, so 1000 is unity and 0 is silence. An
@@ -243,6 +249,8 @@ enum {
 #define LS_CLIENT_FLAG_SETS_BRIGHTNESS 0x0004u
 /* This client can forward its own keyboard and mouse. */
 #define LS_CLIENT_FLAG_SENDS_INPUT  0x0008u
+/* It sends DECODED after every frame, so the host can pace to it exactly. */
+#define LS_CLIENT_FLAG_SAYS_DECODED 0x0010u
 
 /* INPUT_STATUS reasons. */
 #define LS_INPUT_OK              0
@@ -350,6 +358,8 @@ typedef struct {
     /* INPUT_STATUS */
     uint8_t  input_accepting;
     uint8_t  input_reason;
+    /* DECODED: the RTP timestamp of the frame the decoder finished with. */
+    uint32_t decoded_timestamp;
 } ls_ctrl_message;
 
 /* Each builder returns the number of bytes written, or 0 if cap was too small.
@@ -393,6 +403,7 @@ size_t ls_ctrl_build_input_state(uint8_t *dst, size_t cap, uint8_t engaged,
                                  const uint8_t held_keys[LS_INPUT_KEY_BITMAP_BYTES]);
 size_t ls_ctrl_build_input_status(uint8_t *dst, size_t cap,
                                   uint8_t accepting, uint8_t reason);
+size_t ls_ctrl_build_decoded(uint8_t *dst, size_t cap, uint32_t rtp_timestamp);
 
 /* `cap` must be at least LS_CTRL_MAX_PACKET. Returns 0 if the bitmap is larger
  * than LS_CURSOR_MAX_IMAGE_BYTES. */

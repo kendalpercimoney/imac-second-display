@@ -40,6 +40,12 @@
 
 - (void)sendStats:(const ls_stats *)stats;
 
+/// The decoder has finished with the frame stamped `timestamp`. Sent for every
+/// frame, from the decode thread; a dozen bytes, thirty or sixty times a second.
+- (void)sendDecoded:(uint32_t)timestamp;
+/// Whether HELLO says DECODED will be sent. YES unless switched off for a test.
+@property (nonatomic, assign) BOOL saysDecoded;
+
 /// Sends a datagram that has already been built. Used for input, which is
 /// built by LSInputForwarder so that it can be tested without a socket.
 - (void)sendBytes:(const uint8_t *)bytes length:(size_t)length;

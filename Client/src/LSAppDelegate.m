@@ -69,6 +69,7 @@
     NSString *_snapshotPath;
     uint32_t  _snapshotAfter;
     uint32_t  _diagnoseTicks;
+    BOOL      _ackFrames;
     NSTimer  *_snapshotTimer;
     NSTimer  *_tickTimer;
     uint64_t  _bytesAtLastTick;
@@ -295,6 +296,16 @@
     _decoder.keyframeNeeded = ^{
         [decoderOwner->_control requestKeyframe];
     };
+    // So the host sends the next frame the moment this one is done, and
+    // never sooner: see LS_MSG_DECODED.
+    // -ackFrames NO turns it off, so the host's fallback can be tested.
+    _ackFrames = ![[NSUserDefaults standardUserDefaults] objectForKey:@"ackFrames"]
+                 || [[NSUserDefaults standardUserDefaults] boolForKey:@"ackFrames"];
+    if (_ackFrames) {
+        _decoder.frameDone = ^(uint32_t timestamp) {
+            [decoderOwner->_control sendDecoded:timestamp];
+        };
+    }
     [_decoder start];
 
     NSError *error = nil;
@@ -328,6 +339,7 @@
     }
 
     _control = [[LSControlClient alloc] initWithHost:_hostAddress port:_controlPort];
+    _control.saysDecoded = _ackFrames;
     if (![_control start:&error]) {
         // Not fatal: without the back-channel we still display video, we just
         // cannot ask for keyframes or report statistics.

@@ -45,6 +45,7 @@
         _port = port;
         _fd = -1;
         _sendLock = [[NSLock alloc] init];
+        _saysDecoded = YES;
     }
     return self;
 }
@@ -218,7 +219,9 @@
                                               | (_canSetBrightness
                                                  ? LS_CLIENT_FLAG_SETS_BRIGHTNESS : 0)
                                               | (_canSendInput
-                                                 ? LS_CLIENT_FLAG_SENDS_INPUT : 0)),
+                                                 ? LS_CLIENT_FLAG_SENDS_INPUT : 0)
+                                              | (_saysDecoded
+                                                 ? LS_CLIENT_FLAG_SAYS_DECODED : 0)),
                                    _haveLocalMAC ? _localMAC : NULL);
     [self sendBytes:buffer length:n];
 }
@@ -230,6 +233,12 @@
 
     uint8_t buffer[LS_CTRL_MAX_SIZE];
     size_t n = ls_ctrl_build_keyframe_req(buffer, sizeof(buffer));
+    [self sendBytes:buffer length:n];
+}
+
+- (void)sendDecoded:(uint32_t)timestamp {
+    uint8_t buffer[LS_CTRL_MAX_SIZE];
+    size_t n = ls_ctrl_build_decoded(buffer, sizeof(buffer), timestamp);
     [self sendBytes:buffer length:n];
 }
 

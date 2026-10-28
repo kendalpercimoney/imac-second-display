@@ -118,7 +118,15 @@ final class StreamController: ObservableObject {
     private var startedWithLinkMTU: Int?
     private var forceKeyframeFlag = false
 
-    // Pacing, all on encodeQueue. See paceInterval.
+    // Pacing, all on encodeQueue. See holdFor.
+    /// The client sends DECODED after every frame.
+    private var clientSaysDecoded = false
+    /// The newest frame sent, until the client says it has finished with it.
+    private var awaitingTimestamp: UInt32?
+    private var awaitingSince: CFAbsoluteTime = 0
+    /// A frame the client never reports -- lost on the way, or refused while
+    /// it waits for a keyframe -- must not stop the stream for good.
+    private static let decodeStallTimeout: Double = 0.25
     /// The client's decode time per frame: the peak of what it has reported,
     /// decaying slowly. 0 until it has said.
     private var clientDecodeSeconds: Double = 0
@@ -496,11 +504,21 @@ final class StreamController: ObservableObject {
                 self.forceKeyframeFlag = true
             }
         }
+        control.onFrameDecoded = { [weak self] timestamp in
+            self?.encodeQueue.async {
+                guard let self, let awaiting = self.awaitingTimestamp,
+                      // That frame or a later one; RTP timestamps wrap.
+                      Int32(bitPattern: timestamp &- awaiting) >= 0 else { return }
+                self.awaitingTimestamp = nil
+                self.flushDeferred()
+            }
+        }
         control.onStateChanged = { [weak self] state in
             self?.onMain { self?.client = state }
             let reported = Double(state.stats.decode_us) / 1_000_000
             self?.encodeQueue.async {
                 guard let self else { return }
+                self.clientSaysDecoded = state.saysDecoded
                 // Hold the peak and let it fade over half a minute or so: a
                 // still screen decodes in 5 ms, and pacing a new gesture to
                 // that would flood the decoder for the second it takes the
@@ -725,6 +743,8 @@ final class StreamController: ObservableObject {
             self.lastCapturedBuffer = nil
             self.deferredFrame = nil
             self.clientDecodeSeconds = 0
+            self.clientSaysDecoded = false
+            self.awaitingTimestamp = nil
         }
 
         // Last, so the display does not vanish out from under a capture that
@@ -758,16 +778,12 @@ final class StreamController: ObservableObject {
             // Too soon for the client to decode: hold it, and send whatever is
             // newest when the pace allows. Keyframes are not held; a client
             // waiting for one shows nothing until it comes.
-            let wait = self.paceInterval - (CFAbsoluteTimeGetCurrent() - self.lastEncodeSubmitTime)
+            let wait = self.holdFor
             if wait > 0 && !self.forceKeyframeFlag {
                 let scheduled = self.deferredFrame != nil
                 self.deferredFrame = (pixelBuffer, time)
                 if !scheduled {
-                    self.encodeQueue.asyncAfter(deadline: .now() + wait) {
-                        guard let frame = self.deferredFrame else { return }
-                        self.deferredFrame = nil
-                        self.encodeCaptured(frame.buffer, frame.time)
-                    }
+                    self.encodeQueue.asyncAfter(deadline: .now() + wait) { self.flushDeferred() }
                 }
                 return
             }
@@ -776,7 +792,47 @@ final class StreamController: ObservableObject {
         }
     }
 
-    /// Sends no more frames than the client can decode.
+    /// How long before another frame may go to the client: 0 for now.
+    ///
+    /// A client that says when it has finished each frame gets exactly one
+    /// frame in flight: the next goes the moment it reports the last, so a big
+    /// frame -- a keyframe, a still refresh -- holds the next one back for as
+    /// long as it actually takes, and a small one for no longer. Averages
+    /// could not do that: a refresh takes the iMac 100 to 200 ms, which pulled
+    /// the average up and left the next gesture paced at 13 to 17 frames a
+    /// second for no reason. One in flight rather than two because the second
+    /// would wait in the client's queue, and the point is latency.
+    ///
+    /// A client that does not say gets paceInterval instead.
+    private var holdFor: Double {
+        if clientSaysDecoded {
+            guard awaitingTimestamp != nil else { return 0 }
+            return max(0, awaitingSince + Self.decodeStallTimeout - CFAbsoluteTimeGetCurrent())
+        }
+        return paceInterval - (CFAbsoluteTimeGetCurrent() - lastEncodeSubmitTime)
+    }
+
+    /// Sends the frame held back, if it may go now. On encodeQueue.
+    private func flushDeferred() {
+        guard let frame = deferredFrame else { return }
+        let wait = holdFor
+        if wait > 0 {
+            encodeQueue.asyncAfter(deadline: .now() + wait) { self.flushDeferred() }
+            return
+        }
+        deferredFrame = nil
+        encodeCaptured(frame.buffer, frame.time)
+    }
+
+    /// A frame stamped `pts` is on its way: in flight from the moment it is
+    /// handed to the encoder, so nothing else slips out before it is packetized.
+    private func markSent(_ pts: CMTime) {
+        awaitingTimestamp = RTPPacketizer.rtpTimestamp(for: pts)
+        awaitingSince = CFAbsoluteTimeGetCurrent()
+    }
+
+    /// Sends no more frames than the client can decode, for a client that does
+    /// not say when it has finished each one.
     ///
     /// The iMac decodes on its CPU, one frame at a time, and at 49 Mb/s a
     /// frame of a zoom takes it about 30 ms: 33 a second, against the 45 to 60
@@ -802,6 +858,7 @@ final class StreamController: ObservableObject {
         self.forceKeyframeFlag = false
         if force { self.lastKeyframeAt = CFAbsoluteTimeGetCurrent() }
 
+        markSent(time)
         let start = CFAbsoluteTimeGetCurrent()
         encoder.encode(pixelBuffer: pixelBuffer, presentationTime: time, forceKeyframe: force)
         let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
@@ -1008,7 +1065,9 @@ final class StreamController: ObservableObject {
             let refining = self.refinement.enabled
             self.refinementLock.unlock()
             if refreshDue {
-                self.refreshStillPicture()
+                // Not on top of a frame the client is still decoding; the
+                // next tick will do.
+                if self.holdFor <= 0 { self.refreshStillPicture() }
                 return
             }
 
@@ -1033,6 +1092,7 @@ final class StreamController: ObservableObject {
             // different epoch from captured ones, which throws the RTP
             // timestamps and the latency measurement off.
             let pts = CMClockGetTime(CMClockGetHostTimeClock())
+            self.markSent(pts)
             encoder.encode(pixelBuffer: latest, presentationTime: pts, forceKeyframe: true)
             self.lastKeyframeAt = CFAbsoluteTimeGetCurrent()
             self.lastEncodeSubmitTime = CFAbsoluteTimeGetCurrent()
@@ -1073,6 +1133,7 @@ final class StreamController: ObservableObject {
             }
         }
         let pts = CMClockGetTime(CMClockGetHostTimeClock())
+        markSent(pts)
         stillEncoder?.encode(pixelBuffer: latest, presentationTime: pts, forceKeyframe: true)
         lastKeyframeAt = CFAbsoluteTimeGetCurrent()
         stillEncoder?.completeFrames()

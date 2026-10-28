@@ -850,6 +850,13 @@ static void testInputMessages(void) {
           && memcmp(message.input_held_keys, held, sizeof(held)) == 0,
           "state did not round trip, including both ends of the key bitmap");
 
+    // The full 32 bits, high bit set, so a sign or width slip would show.
+    n = ls_ctrl_build_decoded(buffer, sizeof(buffer), 0xF00DCAFEu);
+    CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
+          && message.type == LS_MSG_DECODED && message.decoded_timestamp == 0xF00DCAFEu,
+          "decoded did not round trip");
+    CHECK(ls_ctrl_parse(buffer, n - 1, &message) != 0, "a truncated decoded was accepted");
+
     n = ls_ctrl_build_input_status(buffer, sizeof(buffer), 0, LS_INPUT_NEEDS_PERMISSION);
     CHECK(n > 0 && ls_ctrl_parse(buffer, n, &message) == 0
           && message.input_accepting == 0

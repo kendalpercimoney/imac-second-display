@@ -381,6 +381,8 @@ defaults write com.lanscreen.client host 10.0.0.1
 | `pixelFormat` | auto | `2vuy` or `bgra` |
 | `colourCheck` | `YES` | `NO` skips the colour self-check and uses the driver's conversion |
 | `diagnose` | `NO` | `YES` logs, every 5 s, the centre pixel of the decoded frame and of what was drawn, plus packet and decode counts |
+| `ackFrames` | `YES` | `NO` stops telling the host when each frame is decoded, so its fallback pacing can be tested |
+| `decodeDelayMs`, `decodeDelayPerMbitMs` | `0` | testing only: slow every decode by this much, plus this much per megabit, so a fast Mac can stand in for the iMac |
 
 ### Client keys
 
@@ -1808,8 +1810,40 @@ requests at most every 300 ms. With the same zoom:
 So on this iMac 49 Mb/s cannot be smooth however it is paced, and 25 is the
 setting to use, with the still refresh for detail. The refresh keyframes take
 the iMac 100-200 ms each and inflate the decode time the pace follows, which is
-why the last row is slower; pacing on the client saying when each frame is done
-would not have that problem.
+why the last row is slower.
+
+A client that says when it has finished each frame no longer needs the average.
+It sends DECODED with the frame's RTP timestamp after every decode, and the host
+keeps exactly one frame in flight: the next goes the moment the last is
+reported, so a big frame holds the next back for as long as it really takes and
+a small one for no longer. One rather than two, because a second would only wait
+in the client's queue. A frame that is never reported -- lost, or refused while
+the client waits for a keyframe -- holds things up for at most 250 ms.
+
+Tested on this Mac first, against a client slowed to the iMac's measured cost
+(`-decodeDelayMs 18 -decodeDelayPerMbitMs 14`): no frames dropped, no keyframes
+requested, with the refresh on. It did not raise the frame rate, though, and that
+is the useful finding: at a fixed bitrate, fewer frames means bigger ones, and a
+CPU decoder takes longer over bigger frames. The pacing stops the storms; only
+the bitrate decides how many frames a second this iMac can show.
+
+### Stepped edges on small colourful icons: 4:2:0, not the client
+
+The stream carries colour at half the resolution of brightness, in both
+directions. Photos and plain icons hide that; a small, saturated app icon is
+where it shows. Measured with three-pixel bands of saturated colour (`stripes`
+in Tests/LoopSend, scored by Tests/checkchroma.m), mean error per channel:
+
+| reconstruction | mean | worst |
+|---|---|---|
+| the driver's built-in conversion | 20.93 | 148 |
+| the BT.709 shader | 20.93 | 148 |
+| the shader, blending each pixel pair's colour with the next | 20.69 | 198 |
+
+The two conversions are identical, so neither was losing anything; blending
+bought one percent on average and made the worst pixel worse, so it was not
+kept. The colour is gone before the iMac sees it, and 4:4:4 is not something
+10.9's decoder takes.
 
 ### Black after a rebuild or an update: macOS's Local Network check
 

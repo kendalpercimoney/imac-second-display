@@ -285,6 +285,14 @@ size_t ls_ctrl_build_input_status(uint8_t *dst, size_t cap,
     return total;
 }
 
+size_t ls_ctrl_build_decoded(uint8_t *dst, size_t cap, uint32_t rtp_timestamp)
+{
+    size_t total = ctrl_begin(dst, cap, LS_MSG_DECODED, 4);
+    if (!total) return 0;
+    put_u32(dst + CTRL_HDR, rtp_timestamp);
+    return total;
+}
+
 static size_t ctrl_build_token(uint8_t *dst, size_t cap, uint8_t type, uint64_t token)
 {
     size_t total = ctrl_begin(dst, cap, type, 8);
@@ -502,6 +510,11 @@ int ls_ctrl_parse(const uint8_t *src, size_t len, ls_ctrl_message *out)
             if (body >= 48) {
                 out->stats.decoder_flags = get_u32(src + CTRL_HDR + 44);
             }
+            return 0;
+
+        case LS_MSG_DECODED:
+            if (body < 4) return -1;
+            out->decoded_timestamp = get_u32(src + CTRL_HDR);
             return 0;
 
         case LS_MSG_PING:

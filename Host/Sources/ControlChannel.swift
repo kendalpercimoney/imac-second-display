@@ -41,6 +41,8 @@ final class ControlChannel {
         var setsBrightness = false
         /// Whether the client can forward its own keyboard and mouse.
         var sendsInput = false
+        /// Sends DECODED after every frame, so frames can be paced to it.
+        var saysDecoded = false
         var hasSaidHello = false
         var lastSeen: Date?
         var rttMilliseconds: Double = 0
@@ -64,6 +66,9 @@ final class ControlChannel {
 
     /// Fired on the receive thread. Keep the handler cheap.
     var onKeyframeRequested: (() -> Void)?
+    /// The client's decoder finished with the frame of this RTP timestamp.
+    /// Fired on the receive thread, thirty or sixty times a second.
+    var onFrameDecoded: ((UInt32) -> Void)?
     /// Fired on the receive thread when a client introduces itself.
     var onClientHello: (() -> Void)?
     /// Fired on the receive thread when a client reports a usable MAC address.
@@ -196,6 +201,7 @@ final class ControlChannel {
             state.playsAudio = (message.flags & UInt16(LS_CLIENT_FLAG_PLAYS_AUDIO)) != 0
             state.setsBrightness = (message.flags & UInt16(LS_CLIENT_FLAG_SETS_BRIGHTNESS)) != 0
             state.sendsInput = (message.flags & UInt16(LS_CLIENT_FLAG_SENDS_INPUT)) != 0
+            state.saysDecoded = (message.flags & UInt16(LS_CLIENT_FLAG_SAYS_DECODED)) != 0
             state.hasSaidHello = true
             helloIP = from.sin_addr.s_addr
             if !reportedMAC.isEmpty { state.macAddress = reportedMAC }
@@ -206,6 +212,9 @@ final class ControlChannel {
 
         case LS_MSG_KEYFRAME_REQ:
             onKeyframeRequested?()
+
+        case LS_MSG_DECODED:
+            onFrameDecoded?(message.decoded_timestamp)
 
         case LS_MSG_STATS:
             lock.lock()
